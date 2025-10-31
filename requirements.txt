@@ -1,0 +1,89 @@
+# ==========================================
+# 鸣潮抢码器 - Python 依赖列表
+# Wuthering Waves QR Scanner - Requirements
+# ==========================================
+
+# GUI 框架 (GUI Framework)
+PySide6>=6.5.0              # Qt6 图形界面库
+
+# HTTP 网络库 (HTTP Client)
+requests>=2.31.0            # HTTP 请求库
+
+# 图像处理 (Image Processing)
+Pillow>=10.0.0              # 图像处理库
+numpy>=1.24.0               # 数值计算库
+
+# 二维码识别 (QR Code Recognition)
+pyzbar>=0.1.9               # 二维码解码库
+opencv-contrib-python>=4.8.0  # OpenCV + WeChat QR 识别器（推荐）
+# 或者使用标准版（不包含 WeChat QR）：
+# opencv-python>=4.8.0
+
+# 自动化工具 (Automation)
+pyautogui>=0.9.54           # 自动化操作库
+
+# Windows 专用 (Windows Only)
+pywin32>=306                # Windows API
+psutil>=5.9.5               # 系统和进程工具
+
+# 配置文件 (Config)
+PyYAML>=6.0.1               # YAML 配置文件支持
+
+# 屏幕截图加速 (Screenshot Acceleration)
+dxcam>=0.0.5                # DXGI GPU 加速截图（推荐）
+mss>=9.0.1                  # 快速截图库（备用）
+
+# ==========================================
+# 可选依赖 - 性能优化 (Optional - Performance)
+# ==========================================
+
+# HTTP/2 支持（可选，降低网络延迟 30-50%）
+# HTTP/2 Support (Optional, reduce latency by 30-50%)
+# pip install httpx[http2]
+# 或者 (or)
+# pip install hyper
+
+# 快速 DNS 解析（可选，使用更快的 DNS 服务器）
+# Fast DNS Resolution (Optional, use faster DNS servers)
+# pip install dnspython
+
+# ==========================================
+# 开发依赖 (Development Only)
+# ==========================================
+
+# 代码质量检查（开发时使用）
+# Code Quality (For development)
+# pip install pylint
+# pip install black
+# pip install flake8
+
+# 打包工具（构建 exe 时使用）
+# Packaging (For building exe)
+# pip install pyinstaller
+
+# ==========================================
+# 安装说明 (Installation Instructions)
+# ==========================================
+
+# 1. 标准安装 (Standard Installation):
+#    pip install -r requirements.txt
+
+# 2. 使用清华镜像加速 (Use Tsinghua Mirror):
+#    pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 3. 仅安装核心依赖（最小化）(Core Only - Minimal):
+#    pip install PySide6 requests Pillow pyzbar numpy
+
+# 4. 完整安装（包含所有优化）(Full Installation with all optimizations):
+#    pip install -r requirements.txt
+#    pip install opencv-contrib-python httpx[http2] dnspython
+
+# ==========================================
+# 版本兼容性 (Compatibility)
+# ==========================================
+
+# Python: 3.11+
+# OS: Windows 10/11 (64-bit)
+# 推荐：Windows 11 + Python 3.11 + 所有依赖最新版本
+# Recommended: Windows 11 + Python 3.11 + Latest versions
+
