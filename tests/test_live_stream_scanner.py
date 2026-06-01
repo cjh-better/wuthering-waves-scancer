@@ -21,6 +21,7 @@ import sys
 import os
 import time
 import threading
+import types
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -34,7 +35,9 @@ from utils.live_stream_scanner import (
     LiveStreamScanner,
     LiveStreamInfo,
     LiveStreamStatus,
+    DEFAULT_SCAN_FRAME_STRIDE,
 )
+from utils.qr_payload import extract_kuro_ticket, is_kuro_qr
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +322,72 @@ class TestShortQRCodeHandling:
         assert detected.count(short_qr) == 1, (
             f"Short QR code emitted {detected.count(short_qr)} times, expected 1"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fast frame decode + payload de-duplication
+# ---------------------------------------------------------------------------
+
+class TestFastFrameDecodeAndPayload:
+    """Competitive live scanning path: decode BGR frames directly."""
+
+    def test_scan_frame_uses_ai_array_fast_path(self):
+        scanner = LiveStreamScanner()
+        dummy = _make_dummy_frame()
+        fake_ai = MagicMock()
+        fake_ai.try_decode_array.return_value = "G152#KURO_FAST"
+
+        fake_module = types.SimpleNamespace(ai_qr_scanner=fake_ai)
+        with patch.dict(sys.modules, {"utils.ai_qr_scanner": fake_module}):
+            result = scanner._scan_frame(dummy)
+
+        assert result == "G152#KURO_FAST"
+        fake_ai.try_decode_array.assert_called_once()
+        _, kwargs = fake_ai.try_decode_array.call_args
+        assert kwargs["color"] == "BGR"
+
+    def test_same_ticket_with_different_url_is_emitted_once(self):
+        dummy = _make_dummy_frame()
+        ticket = "A" * 24
+        first_qr = f"https://one.example/G152#KURO_{ticket}"
+        second_qr = f"https://two.example/G152#KURO_{ticket}"
+
+        scanner = LiveStreamScanner()
+        scanner.set_stream_url("http://fake-stream.test/live.flv", "bilibili")
+
+        detected: list[str] = []
+        scanner.qr_detected.connect(
+            detected.append, Qt.ConnectionType.DirectConnection
+        )
+
+        fake_cap = FakeCapture(
+            frames=[(True, dummy)] * 18 + [(False, None)],
+            open_ok=True,
+        )
+
+        with patch.object(
+            scanner, "get_live_stream_info", return_value=_ok_stream_info()
+        ):
+            with patch.object(scanner, "_open_capture", return_value=fake_cap):
+                with patch.object(
+                    scanner,
+                    "_scan_frame",
+                    side_effect=[first_qr, second_qr, second_qr, second_qr, second_qr, second_qr],
+                ):
+                    scanner.start()
+                    scanner.wait(5000)
+
+        _process_events()
+
+        assert detected == [first_qr]
+
+    def test_payload_helpers_extract_ticket_and_reject_noise(self):
+        ticket = "B" * 24
+        qr = f"https://example.com/G152#KURO_{ticket}"
+
+        assert is_kuro_qr(qr) is True
+        assert extract_kuro_ticket(qr) == ticket
+        assert extract_kuro_ticket("https://example.com/not-a-login") is None
 
 
 # ===========================================================================

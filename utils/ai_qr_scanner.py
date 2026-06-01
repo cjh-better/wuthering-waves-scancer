@@ -9,6 +9,8 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from utils.qr_payload import is_kuro_qr, normalise_qr_text
+
 # 尝试导入OpenCV
 try:
     import cv2
@@ -205,6 +207,8 @@ class AIQRScanner:
                 self.wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
                     detect_proto, detect_model, sr_proto, sr_model
                 )
+                if hasattr(self.wechat_detector, "setScaleFactor"):
+                    self.wechat_detector.setScaleFactor(0.4)
                 print("[WeChatQR] Detector initialized (same as MHY_Scanner)")
                 if hasattr(self, 'load_messages'):
                     self.load_messages.append("[WeChatQR] WeChat QR detector enabled (MHY-style)")
@@ -365,36 +369,85 @@ class AIQRScanner:
         
         return enhanced_images
     
+    @staticmethod
+    def _accepted_qr_data(qr_data) -> Optional[str]:
+        """Return QR text only when it belongs to Kuro login."""
+        text = normalise_qr_text(qr_data)
+        if is_kuro_qr(text):
+            return text
+        return None
+
+    def try_decode_array(self, img_array: np.ndarray, color: str = "BGR") -> Optional[str]:
+        """Decode a QR code directly from a numpy frame.
+
+        This avoids RGB-to-PIL conversion on live stream frames. ``color`` may
+        be ``BGR`` (OpenCV default), ``RGB``, or ``GRAY``.
+        """
+        try:
+            if img_array is None:
+                return None
+
+            arr = np.asarray(img_array)
+            if arr.size == 0:
+                return None
+
+            img_bgr = arr
+            color = (color or "BGR").upper()
+            if OPENCV_AVAILABLE:
+                if arr.ndim == 2:
+                    img_bgr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+                elif color == "RGB":
+                    img_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                elif color == "GRAY":
+                    img_bgr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+
+                if self.wechat_detector is not None:
+                    try:
+                        res, points = self.wechat_detector.detectAndDecode(img_bgr)
+                        if isinstance(res, str):
+                            res = [res]
+                        for qr_data in res or []:
+                            accepted = self._accepted_qr_data(qr_data)
+                            if accepted:
+                                return accepted
+                    except Exception:
+                        pass
+
+                if arr.ndim == 2:
+                    pil_image = Image.fromarray(arr)
+                else:
+                    rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(rgb)
+            else:
+                pil_image = Image.fromarray(arr)
+
+            decoded_objects = decode(pil_image)
+            for obj in decoded_objects:
+                accepted = self._accepted_qr_data(obj.data)
+                if accepted:
+                    return accepted
+        except Exception:
+            pass
+        return None
+
     def try_decode_qr(self, img: Image.Image) -> Optional[str]:
         """
         尝试解码单张图片的QR码
         🚀 优先使用微信QR码检测器（与MHY_Scanner相同），失败则fallback到pyzbar
         """
-        # 🚀 方案1：微信QR码检测器（与MHY_Scanner相同，性能更强）
-        if self.wechat_detector is not None:
-            try:
-                # 转换为OpenCV格式
-                img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                
-                # 使用微信检测器
-                res, points = self.wechat_detector.detectAndDecode(img_cv)
-                
-                if res and len(res) > 0:
-                    qr_data = res[0]
-                    # 验证是否是鸣潮的二维码
-                    if "G152#KURO" in qr_data or "KURO" in qr_data:
-                        return qr_data
-            except Exception as e:
-                pass  # Fallback到pyzbar
+        if OPENCV_AVAILABLE:
+            result = self.try_decode_array(np.array(img), color="RGB")
+            if result:
+                return result
         
         # 🔄 方案2：Fallback到pyzbar（兼容性好）
         try:
             decoded_objects = decode(img)
             if decoded_objects:
-                qr_data = decoded_objects[0].data.decode("utf-8")
-                # 验证是否是鸣潮的二维码
-                if "G152#KURO" in qr_data or "KURO" in qr_data:
-                    return qr_data
+                for obj in decoded_objects:
+                    accepted = self._accepted_qr_data(obj.data)
+                    if accepted:
+                        return accepted
         except Exception:
             pass
         return None

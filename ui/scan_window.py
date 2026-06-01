@@ -4,6 +4,8 @@ from PySide6.QtCore import Qt, QTimer, Signal, QRect
 from PySide6.QtWidgets import QWidget, QLabel, QApplication
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor
 
+from utils.qr_payload import extract_kuro_ticket
+
 # 尝试导入AI扫描器，如果失败则使用普通扫描器
 try:
     from utils.ai_qr_scanner import ai_qr_scanner as qr_scanner
@@ -43,10 +45,15 @@ class ScanWindow(QWidget):
         self.dragging = False
         self.drag_position = None
         
-        # Scan timer - 🚀 超高频扫描模式（100ms间隔，确保不漏过二维码）
+        # Scan timer - adaptive cadence keeps detection quick without burning CPU.
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self.scan_qr_code)
-        self.scan_interval = 100  # 100ms = 每秒10次扫描（平衡性能和识别率）
+        self.fast_scan_interval = 80
+        self.normal_scan_interval = 140
+        self.idle_scan_interval = 240
+        self.processing_scan_interval = 500
+        self.scan_interval = self.fast_scan_interval
+        self.consecutive_misses = 0
         
         # Hint label - iOS style
         self.hint_label = QLabel("将此框对准二维码\n右键关闭", self)
@@ -74,6 +81,19 @@ class ScanWindow(QWidget):
         
         # 🚀 Ticket去重机制（防止重复提交同一个QR码）
         self.last_ticket = ""  # 上次处理的ticket（QR码的最后24位）
+
+    def _set_scan_interval(self, interval: int):
+        self.scan_interval = interval
+        if self.scan_timer.isActive() and self.scan_timer.interval() != interval:
+            self.scan_timer.start(interval)
+
+    def _adapt_scan_interval_after_miss(self):
+        if self.consecutive_misses >= 60:
+            self._set_scan_interval(self.idle_scan_interval)
+        elif self.consecutive_misses >= 15:
+            self._set_scan_interval(self.normal_scan_interval)
+        else:
+            self._set_scan_interval(self.fast_scan_interval)
     
     def paintEvent(self, event):
         """Paint event"""
@@ -133,6 +153,8 @@ class ScanWindow(QWidget):
         self.last_ticket = ""  # 🚀 清空上次ticket，允许重新扫描
         self.processing_qr = False  # 🚀 重置处理状态
         self.last_qr_code = None  # 🚀 重置上次识别的二维码
+        self.consecutive_misses = 0
+        self._set_scan_interval(self.fast_scan_interval)
         self.scan_timer.start(self.scan_interval)
         self.hint_label.setText("正在扫描...")
     
@@ -145,6 +167,7 @@ class ScanWindow(QWidget):
         """🚀 扫描二维码 - 持续扫描模式"""
         # If processing QR code, skip this scan
         if self.processing_qr:
+            self._set_scan_interval(self.processing_scan_interval)
             return
             
         # Get window position and size
@@ -158,16 +181,13 @@ class ScanWindow(QWidget):
         qr_code = qr_scanner.scan_region(x, y, width, height)
         
         if qr_code:
-            # 🚀 提取Ticket（QR码的最后24位作为唯一标识）
-            if len(qr_code) >= 24:
-                ticket = qr_code[-24:]
-                
-                # 🚀 去重检查：如果与上次ticket相同，直接跳过（防止重复提交）
+            self.consecutive_misses = 0
+            self._set_scan_interval(self.processing_scan_interval)
+            ticket = extract_kuro_ticket(qr_code)
+            if ticket:
                 if ticket == self.last_ticket:
-                    # 已经提交过这个二维码，继续扫描（等待新二维码）
                     return
-                
-                # 🚀 发现新二维码！
+
                 self.last_ticket = ticket
                 print(f"[QR] ✓ New QR detected: {ticket[:8]}...")
             
@@ -195,12 +215,17 @@ class ScanWindow(QWidget):
             
             # 3秒后重置处理状态（允许识别新二维码）
             QTimer.singleShot(3000, self.reset_processing)
+        else:
+            self.consecutive_misses += 1
+            self._adapt_scan_interval_after_miss()
     
     def reset_processing(self):
         """Reset processing state"""
         # 🚀 只重置处理标志，保留last_ticket（防止重复提交同一个码）
         self.processing_qr = False
         self.last_qr_code = None
+        self.consecutive_misses = 0
+        self._set_scan_interval(self.fast_scan_interval)
         # 如果扫描窗口还在运行，恢复提示
         if not self.scan_timer.isActive():
             self.scan_timer.start(self.scan_interval)

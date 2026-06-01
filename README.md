@@ -2,7 +2,7 @@
 
 一款专为《鸣潮》游戏设计的高性能二维码扫描登录工具，支持屏幕扫描和直播流扫描。
 
-![Version](https://img.shields.io/badge/version-1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-3.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
 
@@ -13,6 +13,7 @@
 - **📸 屏幕扫描** - 半透明可拖动扫描框，实时识别屏幕二维码
 - **🎥 直播流扫描** - 支持抖音直播间实时流扫描（专为直播抢码设计）
 - **🚀 自动登录** - 检测到二维码自动提交，响应速度快
+- **🔐 Token 加密存储** - Windows 下使用 DPAPI 保护账号 token，仅当前系统用户可解密
 - **🤖 AI增强** - Caffe深度学习模型，提升模糊二维码识别率
 - **⚡ GPU加速** - DXGI截图技术，识别速度提升5-10倍
 - **🎨 现代UI** - iOS风格界面，简洁美观

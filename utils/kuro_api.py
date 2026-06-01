@@ -5,7 +5,6 @@ import socket
 from typing import Dict, Optional, Any
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from urllib3.util.connection import create_connection
 
 # 尝试导入 HTTP/2 支持
 try:
@@ -93,11 +92,6 @@ def patched_create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, s
     sock.connect((ip, port))
     
     return sock
-
-
-# 替换urllib3的连接创建函数
-import urllib3.util.connection
-urllib3.util.connection.create_connection = patched_create_connection
 
 
 class KuroAPI:

@@ -1,50 +1,68 @@
-# -*- coding: utf-8 -*-
+# -*- mode: python ; coding: utf-8 -*-
 import os
 
-# pyzbar DLL 文件路径
-pyzbar_path = r'C:\Users\junhao\AppData\Local\Programs\Python\Python311\Lib\site-packages\pyzbar'
-# 程序图标路径（ICO格式）
-icon_path = 'icon.ico'
-png_path = '11409B.png'
+import pyzbar
 
+
+pyzbar_path = os.path.dirname(pyzbar.__file__)
+icon_path = "icon.ico"
+png_path = "11409B.png"
 block_cipher = None
 
+release_excludes = [
+    "pytest",
+    "unittest",
+    "pydoc",
+    "doctest",
+    "tkinter",
+    "matplotlib",
+    "IPython",
+    "jupyter",
+    "notebook",
+    "PySide6.QtQml",
+    "PySide6.QtQuick",
+    "PySide6.QtQuickWidgets",
+    "PySide6.QtPdf",
+    "PySide6.QtVirtualKeyboard",
+]
+
 a = Analysis(
-    ['main.py'],
+    ["main.py"],
     pathex=[],
     binaries=[
-        # 添加 pyzbar 的 DLL 文件
-        (os.path.join(pyzbar_path, 'libiconv.dll'), 'pyzbar'),
-        (os.path.join(pyzbar_path, 'libzbar-64.dll'), 'pyzbar'),
+        (os.path.join(pyzbar_path, "libiconv.dll"), "pyzbar"),
+        (os.path.join(pyzbar_path, "libzbar-64.dll"), "pyzbar"),
     ],
     datas=[
-        # 添加程序图标（PNG格式用于窗口显示）
-        (png_path, '.'),
-        # 添加AI模型文件
-        ('ScanModel', 'ScanModel'),
+        (png_path, "."),
+        ("ScanModel", "ScanModel"),
     ],
     hiddenimports=[
-        'ui',
-        'ui.main_window',
-        'ui.login_dialog',
-        'ui.scan_window',
-        'utils',
-        'utils.config_manager',
-        'utils.kuro_api',
-        'utils.qr_scanner',
-        'utils.ai_qr_scanner',  # AI扫描器
-        'utils.fast_screenshot',  # BitBlt截图
-        'utils.dxgi_screenshot',  # DXGI截图
-        'utils.thread_pool_scanner',  # 线程池
-        'utils.live_stream_scanner',  # 直播流扫描
-        'utils.performance_monitor',  # 🚀 性能监控
-        'utils.image_buffer_pool',  # 🚀 内存池
-        'utils.smart_roi_detector',  # 🚀 ROI预测
+        "ui",
+        "ui.main_window",
+        "ui.login_dialog",
+        "ui.scan_window",
+        "ui.sms_dialog",
+        "utils",
+        "utils.account_manager",
+        "utils.config_manager",
+        "utils.kuro_api",
+        "utils.qr_payload",
+        "utils.qr_scanner",
+        "utils.secure_token_store",
+        "utils.ai_qr_scanner",
+        "utils.fast_screenshot",
+        "utils.dxgi_screenshot",
+        "utils.thread_pool_scanner",
+        "utils.live_stream_scanner",
+        "utils.performance_monitor",
+        "utils.image_buffer_pool",
+        "utils.smart_roi_detector",
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=release_excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -60,21 +78,18 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='鸣潮抢码器',
+    name="鸣潮抢码器",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=["python3.dll", "python314.dll"],
     runtime_tmpdir=None,
     console=False,
-    disable_windowed_traceback=False,
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
     icon=icon_path,
 )
-
-
-

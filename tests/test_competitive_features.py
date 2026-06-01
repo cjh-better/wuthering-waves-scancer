@@ -116,11 +116,21 @@ class TestAccountManager:
         mgr.set_account_note(0, "VIP account")
         assert mgr.get_account_note(0) == "VIP account"
 
+    def test_account_status(self, fresh_account_manager):
+        mgr = fresh_account_manager
+        mgr.add_account("Bob", "uid_bob", "tok_b")
+        assert mgr.get_account_status(0) == "未知"
+        mgr.set_account_status(0, "过期", "Token已过期")
+        assert mgr.get_account_status(0) == "过期"
+        assert mgr.get_account_status_message(0) == "Token已过期"
+
     def test_update_token(self, fresh_account_manager):
         mgr = fresh_account_manager
         mgr.add_account("Carol", "uid_carol", "old_tok")
+        mgr.set_account_status(0, "过期", "Token已过期")
         mgr.update_account_token(0, "new_tok")
         assert mgr.get_account_token(0) == "new_tok"
+        assert mgr.get_account_status(0) == "未知"
 
     def test_delete(self, fresh_account_manager):
         mgr = fresh_account_manager
@@ -153,6 +163,8 @@ class TestAccountManager:
             data = json.load(f)
         assert len(data) == 1
         assert data[0]["uid"] == "uid_p"
+        assert data[0]["token"] != ""
+        assert mgr.get_account_token(0) == "tok_p"
 
     def test_out_of_bounds_returns_empty(self, fresh_account_manager):
         mgr = fresh_account_manager
@@ -184,8 +196,11 @@ class TestConfigManagerNewFields:
     def test_default_has_auto_exit(self, fresh_config_manager):
         assert fresh_config_manager.get("auto_exit") is False
 
-    def test_version_is_2(self, fresh_config_manager):
-        assert fresh_config_manager.get("version") == "2.0"
+    def test_version_is_3(self, fresh_config_manager):
+        assert fresh_config_manager.get("version") == "3.0"
+
+    def test_default_live_scan_frame_stride(self, fresh_config_manager):
+        assert fresh_config_manager.get("live_scan_frame_stride") == 3
 
     def test_set_and_get(self, fresh_config_manager):
         fresh_config_manager.set("auto_exit", True)
@@ -331,6 +346,18 @@ class TestMainWindowAccountIntegration:
         assert win.account_table.rowCount() == 1
         assert win.account_table.item(0, 1).text() == "uid_t"
         assert win.account_table.item(0, 2).text() == "TestUser"
+        assert win.account_table.item(0, 3).text() == "未知"
+        win.close()
+
+    def test_duplicate_qr_ignored_while_login_in_progress(self):
+        win = self._make_window()
+        win.login_in_progress = True
+        win.pending_ticket = "T" * 24
+        win.pending_qr_code = "first"
+
+        win.on_qr_detected(f"https://example.com/G152#KURO_{'T' * 24}")
+
+        assert win.pending_qr_code == "first"
         win.close()
 
     def test_auto_exit_checkbox_persists(self):
@@ -374,3 +401,25 @@ class TestScanThreadAutoLogin:
         assert t.auto_login is False
         t.auto_login = True
         assert t.auto_login is True
+
+
+class TestScanWindowAdaptiveCadence:
+
+    def test_scan_interval_slows_after_misses_and_resets(self):
+        from ui import scan_window as sw_mod
+        from ui.scan_window import ScanWindow
+
+        win = ScanWindow()
+        win.start_scanning()
+        with patch.object(sw_mod.qr_scanner, "scan_region", return_value=None):
+            for _ in range(15):
+                win.scan_qr_code()
+            assert win.scan_interval == win.normal_scan_interval
+
+            for _ in range(45):
+                win.scan_qr_code()
+            assert win.scan_interval == win.idle_scan_interval
+
+        win.reset_processing()
+        assert win.scan_interval == win.fast_scan_interval
+        win.close()

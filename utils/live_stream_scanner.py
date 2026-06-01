@@ -19,6 +19,8 @@ from typing import Dict, Optional, Callable
 from PySide6.QtCore import QThread, Signal
 import time
 
+from utils.qr_payload import extract_kuro_ticket
+
 
 class LiveStreamStatus(IntEnum):
     """Live stream status codes (mirrors MHY_Scanner LiveStreamStatus)."""
@@ -50,6 +52,8 @@ _FFMPEG_LOW_LATENCY_OPTS = (
     "buffer_size;1000"
 )
 
+DEFAULT_SCAN_FRAME_STRIDE = 3
+
 
 class LiveStreamScanner(QThread):
     """直播流扫描器"""
@@ -69,6 +73,17 @@ class LiveStreamScanner(QThread):
         self.is_running = False
         self.cap = None
         self.platform = "bilibili"  # bilibili, douyin
+        self.scan_frame_stride = self._load_scan_frame_stride()
+
+    @staticmethod
+    def _load_scan_frame_stride() -> int:
+        """Load scan cadence from config and clamp it to a sensible range."""
+        try:
+            from utils.config_manager import config_manager
+            stride = int(config_manager.get("live_scan_frame_stride", DEFAULT_SCAN_FRAME_STRIDE))
+        except Exception:
+            stride = DEFAULT_SCAN_FRAME_STRIDE
+        return max(1, min(stride, 30))
     
     def set_stream_url(self, url: str, platform: str = "bilibili"):
         """
@@ -354,14 +369,7 @@ class LiveStreamScanner(QThread):
             
             self.status_changed.emit("已连接直播流，开始扫描...")
             
-            # 导入QR扫描器
-            try:
-                from utils.ai_qr_scanner import ai_qr_scanner
-                scanner = ai_qr_scanner
-            except:
-                from utils.qr_scanner import qr_scanner
-                scanner = qr_scanner
-            
+            scan_stride = self.scan_frame_stride
             frame_count = 0
             last_ticket = ""
             
@@ -377,27 +385,18 @@ class LiveStreamScanner(QThread):
                 
                 frame_count += 1
                 
-                # 每5帧扫描一次（降低CPU占用）
-                if frame_count % 5 != 0:
+                # Scan a configurable cadence. Default 3 is closer to the C++
+                # competitors without saturating Python CPU on weaker machines.
+                if frame_count % scan_stride != 0:
                     continue
                 
                 try:
-                    # 转换为PIL Image
-                    from PIL import Image
-                    import numpy as np
-                    
-                    # BGR转RGB
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_image = Image.fromarray(rgb_frame)
-                    
-                    # 尝试识别QR码
-                    # 注意：这里需要修改scanner接口以支持PIL Image
-                    # 暂时使用简化方法
-                    qr_code = self._scan_frame(pil_image)
+                    qr_code = self._scan_frame(frame)
                     
                     if qr_code:
-                        # 去重检查 - use full string for short codes
-                        ticket = qr_code[-24:] if len(qr_code) >= 24 else qr_code
+                        ticket = extract_kuro_ticket(qr_code)
+                        if not ticket:
+                            continue
                         if ticket != last_ticket:
                             last_ticket = ticket
                             self.qr_detected.emit(qr_code)
@@ -408,7 +407,7 @@ class LiveStreamScanner(QThread):
                     continue
                 
                 # 控制扫描速度
-                time.sleep(0.05)  # 50ms间隔
+                time.sleep(0.02)
             
         except Exception as e:
             self.error_occurred.emit(f"扫描错误: {e}")
@@ -445,12 +444,22 @@ class LiveStreamScanner(QThread):
         """扫描单帧图像"""
         try:
             from utils.ai_qr_scanner import ai_qr_scanner
-            
-            # 使用AI扫描器的try_decode_qr方法
+
+            if hasattr(ai_qr_scanner, "try_decode_array") and hasattr(image, "shape"):
+                return ai_qr_scanner.try_decode_array(image, color="BGR")
             return ai_qr_scanner.try_decode_qr(image)
         except Exception as e:
-            print(f"[LiveStream] Scan error: {e}")
-            return None
+            try:
+                from PIL import Image
+                from utils.qr_scanner import qr_scanner
+
+                if hasattr(image, "shape"):
+                    rgb_frame = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    image = Image.fromarray(rgb_frame)
+                return qr_scanner.try_decode_qr(image)
+            except Exception:
+                print(f"[LiveStream] Scan error: {e}")
+                return None
     
     def stop(self):
         """停止扫描"""

@@ -6,6 +6,8 @@ from typing import Optional, List
 import ctypes
 import numpy as np
 
+from utils.qr_payload import is_kuro_qr, normalise_qr_text
+
 # 尝试导入OpenCV，如果没有就使用基础版本
 try:
     import cv2
@@ -122,10 +124,10 @@ class QRScanner:
         try:
             decoded_objects = decode(img)
             if decoded_objects:
-                qr_data = decoded_objects[0].data.decode("utf-8")
-                # 验证是否是鸣潮的二维码
-                if "G152#KURO" in qr_data or "KURO" in qr_data:
-                    return qr_data
+                for obj in decoded_objects:
+                    qr_data = normalise_qr_text(obj.data)
+                    if is_kuro_qr(qr_data):
+                        return qr_data
         except Exception:
             pass
         return None

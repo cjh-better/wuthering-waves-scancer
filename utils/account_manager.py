@@ -8,6 +8,8 @@ import os
 import threading
 from typing import List, Optional, Dict, Any
 
+from utils.secure_token_store import protect_token, unprotect_token
+
 
 class AccountManager:
     """多账号管理器（单例模式，线程安全）"""
@@ -42,7 +44,8 @@ class AccountManager:
                 with open(self.ACCOUNTS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
-                    self._accounts = data
+                    self._accounts = [self._normalise_account(acc) for acc in data if isinstance(acc, dict)]
+                    self._sync()
                     return
             except Exception as e:
                 print(f"[AccountManager] Failed to load accounts: {e}")
@@ -59,6 +62,18 @@ class AccountManager:
         except Exception as e:
             print(f"[AccountManager] Failed to save accounts: {e}")
 
+    @staticmethod
+    def _normalise_account(acc: Dict[str, Any]) -> Dict[str, str]:
+        return {
+            "name": str(acc.get("name", "")),
+            "uid": str(acc.get("uid", "")),
+            "token": protect_token(str(acc.get("token", ""))),
+            "mobile": str(acc.get("mobile", "")),
+            "note": str(acc.get("note", "")),
+            "status": str(acc.get("status", "未知")),
+            "status_message": str(acc.get("status_message", "")),
+        }
+
     # ------------------------------------------------------------------
     # CRUD
     # ------------------------------------------------------------------
@@ -71,9 +86,11 @@ class AccountManager:
         self._accounts.append({
             "name": name,
             "uid": uid,
-            "token": token,
+            "token": protect_token(token),
             "mobile": mobile,
             "note": "",
+            "status": "未知",
+            "status_message": "",
         })
         self._sync()
 
@@ -98,7 +115,7 @@ class AccountManager:
 
     def get_account_token(self, index: int) -> str:
         acc = self.get_account(index)
-        return acc["token"] if acc else ""
+        return unprotect_token(acc["token"]) if acc else ""
 
     def get_account_mobile(self, index: int) -> str:
         acc = self.get_account(index)
@@ -108,15 +125,31 @@ class AccountManager:
         acc = self.get_account(index)
         return acc.get("note", "") if acc else ""
 
+    def get_account_status(self, index: int) -> str:
+        acc = self.get_account(index)
+        return acc.get("status", "未知") if acc else ""
+
+    def get_account_status_message(self, index: int) -> str:
+        acc = self.get_account(index)
+        return acc.get("status_message", "") if acc else ""
+
     def set_account_note(self, index: int, note: str):
         if 0 <= index < len(self._accounts):
             self._accounts[index]["note"] = note
             self._sync()
 
+    def set_account_status(self, index: int, status: str, message: str = ""):
+        if 0 <= index < len(self._accounts):
+            self._accounts[index]["status"] = status
+            self._accounts[index]["status_message"] = message
+            self._sync()
+
     def update_account_token(self, index: int, token: str):
         """更新指定账号的 token"""
         if 0 <= index < len(self._accounts):
-            self._accounts[index]["token"] = token
+            self._accounts[index]["token"] = protect_token(token)
+            self._accounts[index]["status"] = "未知"
+            self._accounts[index]["status_message"] = ""
             self._sync()
 
     def find_index_by_uid(self, uid: str) -> Optional[int]:

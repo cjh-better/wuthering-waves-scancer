@@ -16,7 +16,8 @@ from ui.scan_window import ScanWindow
 from ui.sms_dialog import SmsDialog
 from utils.config_manager import config_manager
 from utils.account_manager import account_manager
-from utils.kuro_api import kuro_api
+from utils.kuro_api import KuroAPI, kuro_api
+from utils.qr_payload import extract_kuro_ticket
 
 # 性能监控（可选）
 try:
@@ -114,23 +115,30 @@ class ScanThread(QThread):
 class AccountValidityThread(QThread):
     """异步检查账号 token 是否仍然有效"""
 
-    result = Signal(bool, str)  # (valid, message)
+    result = Signal(int, str, str)  # (row, status, message)
 
-    def __init__(self, uid: str, token: str, parent=None):
+    def __init__(self, row: int, uid: str, token: str, parent=None):
         super().__init__(parent)
+        self.row = row
         self.uid = uid
         self.token = token
 
     def run(self):
         try:
-            resp = kuro_api.get_role_infos("CHECK")
-            # 如果返回 220 说明 token 过期
-            if resp.get("code") == 220:
-                self.result.emit(False, "Token已过期，请重新添加账号")
+            checker = KuroAPI()
+            checker.set_token(self.token)
+            resp = checker.get_role_infos("CHECK", smart_retry=False)
+            code = resp.get("code")
+            if code == 220:
+                self.result.emit(self.row, "过期", "Token已过期，请重新添加账号")
+            elif code == -1:
+                self.result.emit(self.row, "未知", resp.get("msg", "网络检查失败"))
+            elif code == 200:
+                self.result.emit(self.row, "可用", "")
             else:
-                self.result.emit(True, "")
+                self.result.emit(self.row, "未知", resp.get("msg", "接口未返回明确状态"))
         except Exception as e:
-            self.result.emit(False, f"检查账号有效性失败: {e}")
+            self.result.emit(self.row, "未知", f"检查账号状态失败: {e}")
 
 
 # ======================================================================
@@ -142,7 +150,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("鸣潮抢码器 v2.0 - 竞品级")
+        self.setWindowTitle("鸣潮抢码器 v3.0 - Release")
         self.setFixedSize(680, 900)
 
         # 程序图标
@@ -157,6 +165,9 @@ class MainWindow(QMainWindow):
         self.scan_thread = None
         self.live_scanner = None
         self.pending_qr_code = None
+        self.pending_ticket = ""
+        self.login_in_progress = False
+        self.account_check_threads = []
         self.selected_account_index = -1  # 当前选中的账号行
 
         self.setup_ui()
@@ -214,6 +225,12 @@ class MainWindow(QMainWindow):
         add_btn.setFixedWidth(120)
         add_btn.clicked.connect(self.on_add_account)
         header.addWidget(add_btn)
+
+        refresh_btn = QPushButton("刷新状态")
+        refresh_btn.setFixedHeight(36)
+        refresh_btn.setFixedWidth(100)
+        refresh_btn.clicked.connect(self.refresh_account_statuses)
+        header.addWidget(refresh_btn)
         info_layout.addLayout(header)
 
         # 当前选中账号显示
@@ -222,15 +239,17 @@ class MainWindow(QMainWindow):
         info_layout.addWidget(self.selected_account_label)
 
         # 账号表格
-        self.account_table = QTableWidget(0, 4)
-        self.account_table.setHorizontalHeaderLabels(["#", "UID", "昵称", "备注"])
+        self.account_table = QTableWidget(0, 5)
+        self.account_table.setHorizontalHeaderLabels(["#", "UID", "昵称", "状态", "备注"])
         self.account_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.account_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self.account_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Fixed)
-        self.account_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.account_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.account_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.account_table.setColumnWidth(0, 35)
         self.account_table.setColumnWidth(1, 110)
         self.account_table.setColumnWidth(2, 110)
+        self.account_table.setColumnWidth(3, 70)
         self.account_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.account_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.account_table.setMinimumHeight(100)
@@ -251,6 +270,7 @@ class MainWindow(QMainWindow):
             self._insert_table_row(
                 account_manager.get_account_uid(i),
                 account_manager.get_account_name(i),
+                account_manager.get_account_status(i),
                 account_manager.get_account_note(i),
             )
         self.account_table.blockSignals(False)
@@ -264,7 +284,7 @@ class MainWindow(QMainWindow):
                 self.account_table.selectRow(idx)
                 self._activate_account(idx)
 
-    def _insert_table_row(self, uid: str, name: str, note: str):
+    def _insert_table_row(self, uid: str, name: str, status: str, note: str):
         row = self.account_table.rowCount()
         self.account_table.insertRow(row)
 
@@ -283,14 +303,64 @@ class MainWindow(QMainWindow):
         name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
         self.account_table.setItem(row, 2, name_item)
 
+        # 状态列（只读）
+        status_item = QTableWidgetItem(status or "未知")
+        status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+        self.account_table.setItem(row, 3, status_item)
+
         # 备注列（可编辑）
         note_item = QTableWidgetItem(note)
-        self.account_table.setItem(row, 3, note_item)
+        self.account_table.setItem(row, 4, note_item)
 
     def _on_note_edited(self, item: QTableWidgetItem):
         """备注列被编辑时同步到 AccountManager"""
-        if item.column() == 3:
+        if item.column() == 4:
             account_manager.set_account_note(item.row(), item.text())
+
+    def refresh_account_statuses(self):
+        """异步刷新账号状态，避免阻塞主窗口。"""
+        if account_manager.size() == 0:
+            self.add_log("没有可刷新的账号")
+            return
+        self.add_log("开始刷新账号状态...")
+        self.account_check_threads = [
+            t for t in self.account_check_threads if t.isRunning()
+        ]
+        for row in range(account_manager.size()):
+            account_manager.set_account_status(row, "检查中", "")
+            self._update_account_status_cell(row, "检查中")
+            thread = AccountValidityThread(
+                row,
+                account_manager.get_account_uid(row),
+                account_manager.get_account_token(row),
+                self,
+            )
+            thread.result.connect(self._on_account_status_checked)
+            thread.finished.connect(lambda t=thread: self._discard_account_check_thread(t))
+            self.account_check_threads.append(thread)
+            thread.start()
+
+    def _discard_account_check_thread(self, thread):
+        if thread in self.account_check_threads:
+            self.account_check_threads.remove(thread)
+
+    def _update_account_status_cell(self, row: int, status: str):
+        if 0 <= row < self.account_table.rowCount():
+            item = self.account_table.item(row, 3)
+            if item is None:
+                item = QTableWidgetItem()
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.account_table.setItem(row, 3, item)
+            item.setText(status)
+
+    def _on_account_status_checked(self, row: int, status: str, message: str):
+        account_manager.set_account_status(row, status, message)
+        self._update_account_status_cell(row, status)
+        name = account_manager.get_account_name(row) or account_manager.get_account_uid(row)
+        if message:
+            self.add_log(f"{name}: {status} - {message}")
+        else:
+            self.add_log(f"{name}: {status}")
 
     def _on_account_selected(self, row: int, _col: int):
         self._activate_account(row)
@@ -495,7 +565,7 @@ class MainWindow(QMainWindow):
         parent_layout.addWidget(log_widget)
 
         # 启动日志
-        self.add_log("鸣潮抢码器 v2.0 - 竞品级")
+        self.add_log("鸣潮抢码器 v3.0 - Release")
         self.add_log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         self.add_log("✓ 多账号管理（增删改查+JSON持久化）")
         self.add_log("✓ 抖音/B站双平台直播流扫描")
@@ -831,8 +901,18 @@ class MainWindow(QMainWindow):
 
     def on_qr_detected(self, qr_code):
         """检测到二维码"""
+        ticket = extract_kuro_ticket(qr_code) or qr_code
+        if self.login_in_progress:
+            if ticket == self.pending_ticket:
+                self.add_log("忽略重复二维码：当前登录请求仍在处理")
+            else:
+                self.add_log("忽略新的二维码：当前登录请求仍在处理")
+            return
+
         self.add_log("✓ 检测到二维码，正在登录...")
         self.pending_qr_code = qr_code
+        self.pending_ticket = ticket
+        self.login_in_progress = True
 
         if self.scan_window:
             self.scan_window.close()
@@ -853,6 +933,8 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 self.add_log("用户取消登录")
                 self.status_label.setText("状态: 已取消")
+                self.login_in_progress = False
+                self.pending_ticket = ""
                 return
 
         self.scan_thread = ScanThread(qr_code, skip_role_check=False)
@@ -863,6 +945,8 @@ class MainWindow(QMainWindow):
     def on_scan_result(self, result):
         """扫码结果回调"""
         if result.get("success"):
+            self.login_in_progress = False
+            self.pending_ticket = ""
             self.add_log("扫码成功！")
             self.status_label.setText("状态: 登录成功")
 
@@ -896,6 +980,8 @@ class MainWindow(QMainWindow):
             if sms_dlg.exec() == SmsDialog.Rejected:
                 self.add_log("用户取消验证")
                 self.status_label.setText("状态: 已取消")
+                self.login_in_progress = False
+                self.pending_ticket = ""
                 return
 
             sms_code = sms_dlg.get_sms_code()
@@ -909,6 +995,8 @@ class MainWindow(QMainWindow):
             self.scan_thread.log_message.connect(self.add_log)
             self.scan_thread.start()
         else:
+            self.login_in_progress = False
+            self.pending_ticket = ""
             message = result.get("message", "未知错误")
             self.add_log(f"❌ 扫码失败: {message}")
 
@@ -940,6 +1028,8 @@ class MainWindow(QMainWindow):
 
     def _stop_all_scanners(self):
         """停止所有扫描器"""
+        self.login_in_progress = False
+        self.pending_ticket = ""
         if self.scan_window:
             self.scan_window.close()
             self.scan_window = None

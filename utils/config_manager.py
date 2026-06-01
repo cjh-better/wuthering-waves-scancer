@@ -41,7 +41,8 @@ class ConfigManager:
             "window_position": None,    # 窗口位置 [x, y]
             "scan_window_size": [800, 800],  # 扫描窗口大小
             "thread_pool_enabled": False,    # 是否启用多线程池
-            "version": "2.0"
+            "live_scan_frame_stride": 3,     # 直播流每几帧扫描一次
+            "version": "3.0"
         }
     
     def _load_config(self) -> Dict[str, Any]:
