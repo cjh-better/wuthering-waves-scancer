@@ -34,13 +34,14 @@ class ConfigManager:
         return {
             "auto_login": False,        # 是否自动登录（检测到QR码立即登录）
             "auto_exit": False,         # 是否登录成功后自动退出
-            "auto_start": False,        # 是否启动后自动开始扫描
-            "last_token": "",           # 上次登录的token
-            "last_uid": "",             # 上次登录的UID
+            "auto_screen": False,       # 是否启动后自动监视屏幕
+            "default_account": "",      # 默认账号UID
+            "last_token": "",           # 上次登录的token（兼容旧版）
+            "last_uid": "",             # 上次登录的UID（兼容旧版）
             "window_position": None,    # 窗口位置 [x, y]
             "scan_window_size": [800, 800],  # 扫描窗口大小
             "thread_pool_enabled": False,    # 是否启用多线程池
-            "version": "1.0"
+            "version": "2.0"
         }
     
     def _load_config(self) -> Dict[str, Any]:
