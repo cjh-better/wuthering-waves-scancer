@@ -1,14 +1,54 @@
 # -*- coding: utf-8 -*-
 """
-直播流QR码扫描器（支持B站、抖音、虎牙等平台）
+直播流QR码扫描器（支持B站、抖音等平台）
 使用OpenCV读取直播流，无需额外安装FFmpeg
+
+Optimized based on MHY_Scanner architecture:
+- Unified LiveStreamInfo return type (status + url + headers)
+- Safe JSON parsing with HTTP error checking
+- Douyin pull_datas + live_core_sdk_data dual-path fallback
+- FFmpeg low-latency parameters for faster QR detection
 """
 import cv2
+import os
 import re
 import requests
-from typing import Optional, Callable
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import Dict, Optional, Callable
 from PySide6.QtCore import QThread, Signal
 import time
+
+
+class LiveStreamStatus(IntEnum):
+    """Live stream status codes (mirrors MHY_Scanner LiveStreamStatus)."""
+    Normal = 0
+    Absent = 1
+    NotLive = 2
+    Error = 3
+
+
+@dataclass
+class LiveStreamInfo:
+    """Bundled result of a live stream query (status + url + headers).
+
+    Ported from MHY_Scanner's ``LiveStreamInfo`` struct so that callers
+    get status and URL in a single call instead of two separate methods.
+    """
+    status: LiveStreamStatus
+    url: str = ""
+    headers: Dict[str, str] = field(default_factory=dict)
+
+
+# FFmpeg low-latency options applied when opening a stream.
+# Ported from MHY_Scanner QRCodeForStream::setUrl().
+_FFMPEG_LOW_LATENCY_OPTS = (
+    "max_delay;0|"
+    "probesize;1024|"
+    "packetsize;128|"
+    "rtbufsize;0|"
+    "buffer_size;1000"
+)
 
 
 class LiveStreamScanner(QThread):
@@ -28,7 +68,7 @@ class LiveStreamScanner(QThread):
         self.stream_url = ""
         self.is_running = False
         self.cap = None
-        self.platform = "bilibili"  # bilibili, douyin, huya
+        self.platform = "bilibili"  # bilibili, douyin
     
     def set_stream_url(self, url: str, platform: str = "bilibili"):
         """
@@ -36,111 +76,276 @@ class LiveStreamScanner(QThread):
         
         Args:
             url: 直播流URL或房间号
-            platform: 平台类型 (bilibili, douyin, huya)
+            platform: 平台类型 (bilibili, douyin)
         """
         self.stream_url = url
         self.platform = platform
     
-    def get_bilibili_stream_url(self, room_id: str) -> Optional[str]:
+    # ------------------------------------------------------------------
+    # Platform stream fetchers
+    # ------------------------------------------------------------------
+
+    def get_live_stream_info(self, room_id: str, platform: str) -> LiveStreamInfo:
+        """Unified entry point – fetch stream info for *platform*.
+
+        Returns a `LiveStreamInfo` with status, url, and any extra headers
+        needed to open the stream.  Mirrors MHY_Scanner's
+        ``GetLiveInfo<T>(roomID)`` template dispatch.
         """
-        获取B站直播流地址
-        
-        Args:
-            room_id: B站房间号
-        
-        Returns:
-            直播流URL，失败返回None
+        fetchers = {
+            "bilibili": self._get_bilibili_stream_info,
+            "douyin": self._get_douyin_stream_info,
+        }
+        fetcher = fetchers.get(platform)
+        if fetcher is None:
+            return LiveStreamInfo(status=LiveStreamStatus.Error)
+        return fetcher(room_id)
+
+    # -- Bilibili -------------------------------------------------------
+
+    def _get_bilibili_stream_info(self, room_id: str) -> LiveStreamInfo:
+        """Fetch Bilibili stream info.
+
+        Uses the ``room_init`` API to resolve the real room ID, then
+        ``getRoomPlayInfo`` (v2) to obtain the stream URL.  HTTP errors
+        and malformed JSON are handled defensively (ported from
+        MHY_Scanner ``LiveBili::GetLiveStreamInfo``).
         """
         try:
-            # 获取房间信息
-            api_url = f"https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room_id}"
-            response = requests.get(api_url, timeout=5)
-            data = response.json()
-            
-            if data.get("code") != 0:
-                self.error_occurred.emit(f"房间不存在或未开播")
-                return None
-            
-            # 检查直播状态
-            live_status = data["data"]["live_status"]
+            # Step 1 – room_init (get real room ID + live status)
+            init_url = "https://api.live.bilibili.com/room/v1/Room/room_init"
+            r = requests.get(init_url, params={"id": room_id}, timeout=5)
+            if r.status_code != 200:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            room_info = self._safe_json(r.text)
+            if room_info is None:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            code = room_info.get("code")
+            if code == 60004:
+                return LiveStreamInfo(status=LiveStreamStatus.Absent)
+            if code != 0:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            live_status = room_info["data"]["live_status"]
             if live_status != 1:
-                self.error_occurred.emit("主播未开播")
-                return None
-            
-            # 获取真实房间号
-            real_room_id = data["data"]["room_id"]
-            
-            # 获取直播流地址
-            stream_api = f"https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo"
+                return LiveStreamInfo(status=LiveStreamStatus.NotLive)
+
+            real_room_id = room_info["data"]["room_id"]
+
+            # Step 2 – getRoomPlayInfo (v2)
+            play_url = "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo"
             params = {
                 "room_id": real_room_id,
                 "protocol": "0,1",
-                "format": "0,1,2",
-                "codec": "0,1",
-                "qn": 10000,
-                "platform": "web",
-                "ptype": 8
+                "format": "0,2",
+                "codec": "0",
+                "only_audio": "0",
+                "only_video": "0",
+                "qn": "10000",
             }
-            
-            response = requests.get(stream_api, params=params, timeout=5)
-            data = response.json()
-            
-            # 解析流地址
-            if data.get("code") == 0 and "playurl_info" in data["data"]:
-                streams = data["data"]["playurl_info"]["playurl"]["stream"]
-                for stream in streams:
-                    for format_item in stream["format"]:
-                        for codec in format_item["codec"]:
-                            if "url_info" in codec:
-                                base_url = codec["url_info"][0]["host"]
-                                extra = codec["url_info"][0]["extra"]
-                                url = f"{base_url}{codec['base_url']}{extra}"
-                                return url
-            
-            self.error_occurred.emit("无法获取直播流地址")
-            return None
-            
+            r = requests.get(play_url, params=params, timeout=5)
+            if r.status_code != 200:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            play_info = self._safe_json(r.text)
+            if play_info is None:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            stream_url = self._parse_bilibili_play_info(play_info)
+            if not stream_url:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/110.0.0.0 Safari/537.36 Edg/110.0.1587.41"
+                ),
+                "Referer": "https://live.bilibili.com",
+            }
+            return LiveStreamInfo(
+                status=LiveStreamStatus.Normal,
+                url=stream_url,
+                headers=headers,
+            )
         except Exception as e:
-            self.error_occurred.emit(f"获取B站直播流失败: {e}")
-            return None
-    
-    def get_douyin_stream_url(self, room_id: str) -> Optional[str]:
-        """
-        获取抖音直播流地址（简化版）
-        
-        Args:
-            room_id: 抖音房间号或直播间URL
-        
-        Returns:
-            直播流URL，失败返回None
+            print(f"[LiveStream] Bilibili fetch error: {e}")
+            return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+    @staticmethod
+    def _parse_bilibili_play_info(play_info: dict) -> str:
+        """Extract the first stream URL from ``getRoomPlayInfo`` response."""
+        try:
+            streams = play_info["data"]["playurl_info"]["playurl"]["stream"]
+            codec = streams[0]["format"][0]["codec"][0]
+            host = codec["url_info"][0]["host"]
+            base = codec["base_url"]
+            extra = codec["url_info"][0]["extra"]
+            return f"{host}{base}{extra}"
+        except (KeyError, IndexError, TypeError):
+            return ""
+
+    # -- Douyin ---------------------------------------------------------
+
+    def _get_douyin_stream_info(self, room_id: str) -> LiveStreamInfo:
+        """Fetch Douyin stream info.
+
+        Implements the full Douyin room API with both ``pull_datas`` and
+        ``live_core_sdk_data`` fallback paths, ported from MHY_Scanner's
+        ``LiveDouyin::GetLiveStreamInfo`` + ``GetStreamLinkFromResponse``.
         """
         try:
-            # 抖音直播流获取较复杂，需要解析网页
-            # 这里提供一个简化实现
-            self.error_occurred.emit("抖音直播流需要额外配置，建议使用B站")
-            return None
+            user_agent = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/92.0.4515.159 Safari/537.36"
+            )
+            headers = {
+                "User-Agent": user_agent,
+                "Referer": "https://live.douyin.com/",
+            }
+            params = (
+                "aid=6383&app_name=douyin_web&live_id=1"
+                "&device_platform=web&browser_language=zh-CN"
+                "&browser_platform=Win32&browser_name=Edge"
+                "&browser_version=139.0.0.0"
+                "&is_need_double_stream=false"
+                f"&web_rid={room_id}"
+            )
+            url = f"https://live.douyin.com/webcast/room/web/enter/?{params}"
+
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code != 200:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            info = self._safe_json(r.text)
+            if info is None:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            if info.get("status_code") != 0:
+                return LiveStreamInfo(status=LiveStreamStatus.Absent)
+
+            data_arr = info.get("data", {}).get("data", [])
+            if not data_arr:
+                return LiveStreamInfo(status=LiveStreamStatus.Absent)
+
+            room_data = data_arr[0]
+            status = room_data.get("status")
+            if status == 4:
+                return LiveStreamInfo(status=LiveStreamStatus.NotLive)
+            if status != 2:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            # Extract FLV URL (try pull_datas first, then live_core_sdk_data)
+            flv_url = self._parse_douyin_stream(room_data)
+            if not flv_url:
+                return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+            return LiveStreamInfo(
+                status=LiveStreamStatus.Normal,
+                url=flv_url,
+            )
         except Exception as e:
-            self.error_occurred.emit(f"获取抖音直播流失败: {e}")
+            print(f"[LiveStream] Douyin fetch error: {e}")
+            return LiveStreamInfo(status=LiveStreamStatus.Error)
+
+    def _parse_douyin_stream(self, room_data: dict) -> str:
+        """Extract FLV URL from Douyin room data.
+
+        Tries ``pull_datas`` first, then falls back to
+        ``live_core_sdk_data``.  This dual-path approach is ported from
+        MHY_Scanner's ``LiveDouyin::GetStreamLinkFromResponse`` and
+        fixes a missing fallback in the original KuRo_Scanner.
+        """
+        stream_url = room_data.get("stream_url", {})
+
+        # Path 1: pull_datas (newer API)
+        pull_datas = stream_url.get("pull_datas")
+        if pull_datas and isinstance(pull_datas, dict):
+            try:
+                first_entry = next(iter(pull_datas.values()))
+                stream_data_str = first_entry.get("stream_data", "")
+                if stream_data_str:
+                    sd = self._safe_json(stream_data_str)
+                    if sd:
+                        url = sd["data"]["origin"]["main"]["flv"]
+                        if url:
+                            return url
+            except (KeyError, StopIteration, TypeError):
+                pass
+
+        # Path 2: live_core_sdk_data (older API)
+        core_sdk = stream_url.get("live_core_sdk_data", {})
+        pull_data = core_sdk.get("pull_data", {})
+        stream_data_str = pull_data.get("stream_data", "")
+        if not isinstance(stream_data_str, str) or not stream_data_str:
+            return ""
+        try:
+            sd = self._safe_json(stream_data_str)
+            if sd:
+                return sd["data"]["origin"]["main"]["flv"]
+        except (KeyError, TypeError):
+            pass
+
+        return ""
+
+    # -- Helpers --------------------------------------------------------
+
+    @staticmethod
+    def _safe_json(text: str) -> Optional[dict]:
+        """Parse JSON defensively, returning *None* on failure.
+
+        Equivalent to MHY_Scanner's ``json::parse(text, nullptr, false)``
+        + ``is_discarded()`` check.
+        """
+        try:
+            return requests.compat.json.loads(text)  # type: ignore[attr-defined]
+        except (ValueError, TypeError):
             return None
     
+    def _open_capture(self, url: str) -> cv2.VideoCapture:
+        """Open a VideoCapture with low-latency FFmpeg options.
+
+        Ported from MHY_Scanner ``QRCodeForStream::setUrl()`` which sets
+        ``max_delay=0``, ``probesize=1024``, ``packetsize=128``, etc.
+        In Python/OpenCV these are passed via the
+        ``OPENCV_FFMPEG_CAPTURE_OPTIONS`` environment variable.
+        """
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _FFMPEG_LOW_LATENCY_OPTS
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        # Minimise internal frame buffer to reduce latency
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
     def run(self):
         """主扫描循环"""
         self.is_running = True
         self.status_changed.emit("正在连接直播流...")
         
-        # 解析流地址
-        stream_url = self.stream_url
-        
-        # 如果是房间号，获取流地址
-        if self.platform == "bilibili" and stream_url.isdigit():
-            stream_url = self.get_bilibili_stream_url(stream_url)
-            if not stream_url:
-                self.is_running = False
-                return
-        
+        # Fetch stream info via unified API
+        room_id = self.stream_url
+        info = self.get_live_stream_info(room_id, self.platform)
+
+        if info.status == LiveStreamStatus.Absent:
+            self.error_occurred.emit("房间不存在")
+            self.is_running = False
+            return
+        if info.status == LiveStreamStatus.NotLive:
+            self.error_occurred.emit("主播未开播")
+            self.is_running = False
+            return
+        if info.status != LiveStreamStatus.Normal or not info.url:
+            self.error_occurred.emit("无法获取直播流地址")
+            self.is_running = False
+            return
+
+        stream_url = info.url
+
         # 打开视频流
         try:
-            self.cap = cv2.VideoCapture(stream_url)
+            self.cap = self._open_capture(stream_url)
             
             if not self.cap.isOpened():
                 self.error_occurred.emit("无法打开直播流")
@@ -228,7 +433,7 @@ class LiveStreamScanner(QThread):
             # Release old capture before reopening
             if self.cap:
                 self.cap.release()
-            self.cap = cv2.VideoCapture(stream_url)
+            self.cap = self._open_capture(stream_url)
             if self.cap.isOpened():
                 ret, _ = self.cap.read()
                 if ret:
