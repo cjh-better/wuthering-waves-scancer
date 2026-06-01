@@ -19,6 +19,10 @@ class LiveStreamScanner(QThread):
     status_changed = Signal(str)  # 状态改变
     error_occurred = Signal(str)  # 错误发生
     
+    # Reconnection settings
+    MAX_RECONNECT_ATTEMPTS = 3
+    RECONNECT_DELAYS = [0.6, 1.2, 2.0]
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.stream_url = ""
@@ -160,8 +164,11 @@ class LiveStreamScanner(QThread):
                 ret, frame = self.cap.read()
                 
                 if not ret:
-                    self.error_occurred.emit("直播流中断")
-                    break
+                    # Attempt reconnection with exponential backoff
+                    if not self._try_reconnect(stream_url):
+                        self.error_occurred.emit("直播流中断，重连失败")
+                        break
+                    continue
                 
                 frame_count += 1
                 
@@ -184,13 +191,12 @@ class LiveStreamScanner(QThread):
                     qr_code = self._scan_frame(pil_image)
                     
                     if qr_code:
-                        # 去重检查
-                        if len(qr_code) >= 24:
-                            ticket = qr_code[-24:]
-                            if ticket != last_ticket:
-                                last_ticket = ticket
-                                self.qr_detected.emit(qr_code)
-                                self.status_changed.emit(f"检测到QR码: {ticket[:8]}...")
+                        # 去重检查 - use full string for short codes
+                        ticket = qr_code[-24:] if len(qr_code) >= 24 else qr_code
+                        if ticket != last_ticket:
+                            last_ticket = ticket
+                            self.qr_detected.emit(qr_code)
+                            self.status_changed.emit(f"检测到QR码: {ticket[:8]}...")
                 
                 except Exception as e:
                     print(f"[LiveStream] Frame scan error: {e}")
@@ -203,6 +209,32 @@ class LiveStreamScanner(QThread):
             self.error_occurred.emit(f"扫描错误: {e}")
         finally:
             self.cleanup()
+    
+    def _try_reconnect(self, stream_url: str) -> bool:
+        """Attempt to reconnect to the stream with exponential backoff.
+        
+        Returns True if reconnection succeeds, False if all attempts fail.
+        """
+        for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
+            if not self.is_running:
+                return False
+            delay = self.RECONNECT_DELAYS[attempt] if attempt < len(self.RECONNECT_DELAYS) else self.RECONNECT_DELAYS[-1]
+            self.status_changed.emit(
+                f"直播流中断，正在重连 ({attempt + 1}/{self.MAX_RECONNECT_ATTEMPTS})..."
+            )
+            time.sleep(delay)
+            if not self.is_running:
+                return False
+            # Release old capture before reopening
+            if self.cap:
+                self.cap.release()
+            self.cap = cv2.VideoCapture(stream_url)
+            if self.cap.isOpened():
+                ret, _ = self.cap.read()
+                if ret:
+                    self.status_changed.emit("重连成功，继续扫描...")
+                    return True
+        return False
     
     def _scan_frame(self, image) -> Optional[str]:
         """扫描单帧图像"""
@@ -218,6 +250,9 @@ class LiveStreamScanner(QThread):
     def stop(self):
         """停止扫描"""
         self.is_running = False
+        # Release the capture to unblock any pending cap.read()
+        if self.cap:
+            self.cap.release()
         self.status_changed.emit("正在停止...")
     
     def cleanup(self):
