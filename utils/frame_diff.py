@@ -23,6 +23,13 @@ from utils.log import get_logger
 
 logger = get_logger("LiveStream")
 
+try:
+    import cv2
+    _CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    _CV2_AVAILABLE = False
+
 _DEFAULT_SIZE: Tuple[int, int] = (64, 36)
 
 
@@ -55,9 +62,8 @@ class FrameChangeDetector:
         the safety net still covers them).
         """
         try:
-            import cv2
-            import numpy as np
-
+            if not _CV2_AVAILABLE:
+                return 0.0
             arr = np.asarray(frame)
             if arr.size == 0 or 0 in arr.shape:
                 return 0.0
