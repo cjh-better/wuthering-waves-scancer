@@ -246,7 +246,8 @@ def result_encrypt(long_str: str, num: str | None = None) -> str:
 
     encoding_table = encoding_tables[num]
 
-    result = ""
+    # 用 list 收集再 join，避免循环内字符串 += 的 O(n²) 拷贝
+    result_parts = []
     round_num = 0
     long_int = get_long_int(round_num, long_str)
 
@@ -264,9 +265,9 @@ def result_encrypt(long_str: str, num: str | None = None) -> str:
         # 使用掩码和位移提取6位值
         char_index = (long_int & masks[index]) >> shifts[index]
 
-        result += encoding_table[char_index]
+        result_parts.append(encoding_table[char_index])
 
-    return result
+    return "".join(result_parts)
 
 
 def get_long_int(round_num: int, long_str: str) -> int:
