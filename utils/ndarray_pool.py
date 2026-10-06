@@ -13,6 +13,7 @@ import numpy as np
 
 
 class NDArrayPool:
+    """numpy 数组对象池，按 (shape, dtype) 复用，避免高频分配。"""
     def __init__(self, max_cached: int = 8):
         self._cache: "OrderedDict[Tuple[tuple, str], np.ndarray]" = OrderedDict()
         self._lock = threading.Lock()
@@ -43,6 +44,7 @@ class NDArrayPool:
                 self._cache.popitem(last=False)
 
     def clear(self) -> None:
+        """清空缓存的数组。"""
         with self._lock:
             self._cache.clear()
 

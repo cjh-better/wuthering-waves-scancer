@@ -97,8 +97,7 @@ def main():
         except Exception:
             _lock_f = None
     except Exception:
-        # 已有实例在运行
-        print("已有实例在运行，退出。")
+        # 已有实例在运行（exe 无控制台，print 不可见，用弹窗提示）
         try:
             from PySide6.QtWidgets import QApplication, QMessageBox
             _app = QApplication([])

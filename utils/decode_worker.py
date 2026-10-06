@@ -189,6 +189,7 @@ class IsolatedDecoder:
         return ok
 
     def shutdown(self) -> None:
+        """关闭子进程并清理队列，幂等。"""
         self._terminate()
         for q in (self._task_q, self._result_q):
             try:
@@ -239,4 +240,5 @@ class IsolatedDecoder:
 
     @property
     def restarts(self) -> int:
+        """返回子进程累计重启次数。"""
         return self._restarts
