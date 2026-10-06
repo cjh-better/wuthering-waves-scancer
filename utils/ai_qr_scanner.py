@@ -621,12 +621,11 @@ class AIQRScanner:
             # pyzbar 兜底（~200ms）：只在允许时跑。热路径上 WeChatQR 已尝试
             # 未命中即返回，避免慢兜底阻塞更新鲜的帧；WeChatQR 不可用时
             # pyzbar 是唯一希望，必须跑。
-            # 优化1：小图跳过 pyzbar——WeChatQR 已 miss，小图上 pyzbar
-            # 几乎不可能命中，省 ~200ms。
+            # 注意：曾有"小图跳过 pyzbar"优化，但它与以下契约冲突：
+            # 1) allow_slow_fallback=True 时调用方明确要求跑慢兜底
+            # 2) WeChatQR 不可用时 pyzbar 是唯一解码器
+            # 故移除该优化，保证契约优先。
             if not allow_slow_fallback and wechat_attempted:
-                return None
-            h_px, w_px = arr.shape[0], arr.shape[1]
-            if wechat_attempted and max(h_px, w_px) < 400:
                 return None
             decoded_objects = decode(pil_image)
             for obj in decoded_objects:

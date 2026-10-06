@@ -104,12 +104,17 @@ class TestAllowSlowFallback:
         import numpy as np
 
         # mock wechat_detector.detectAndDecode 返回空
+        # 注意：实际解码走 _get_thread_detector() 的 thread-local 实例，
+        # 直接 mock 该方法才能生效
         class FakeDetector:
             def detectAndDecode(self, img):
                 return [], None
 
-        monkeypatch.setattr(scanner, "wechat_detector", FakeDetector())
-        img = np.zeros((64, 64, 3), dtype=np.uint8)
+        monkeypatch.setattr(scanner, "_get_thread_detector", lambda: FakeDetector())
+        # 用噪声图而非纯黑图：纯色图会被"纯色快速拒绝"优化提前拦掉，
+        # 测试的是 fallback 逻辑，需要能通过前置检查的图像
+        rng = np.random.default_rng(42)
+        img = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
 
         assert scanner.try_decode_array(img, allow_slow_fallback=False) is None
         assert pyzbar_calls == [], "pyzbar 不应被调用"
@@ -129,6 +134,8 @@ class TestAllowSlowFallback:
 
         import numpy as np
 
-        img = np.zeros((64, 64, 3), dtype=np.uint8)
+        # 用噪声图而非纯黑图：纯色图会被"纯色快速拒绝"优化提前拦掉
+        rng = np.random.default_rng(42)
+        img = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
         scanner.try_decode_array(img, allow_slow_fallback=False)
         assert len(pyzbar_calls) == 1
