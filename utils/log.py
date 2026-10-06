@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+import time
 
 _configured = False
 
@@ -21,16 +23,14 @@ class _DedupFilter(logging.Filter):
     def __init__(self):
         super().__init__()
         self._last: dict = {}
-        import threading as _th
-        self._lock = _th.Lock()
+        self._lock = threading.Lock()
 
     def filter(self, record: logging.LogRecord) -> bool:
         # 只对 WARNING 及以上去重，INFO 正常输出
         if record.levelno < logging.WARNING:
             return True
         key = (record.name, record.levelno, record.getMessage()[:100])
-        import time as _t
-        now = _t.time()
+        now = time.time()
         with self._lock:
             last = self._last.get(key, 0)
             if now - last < 60:
