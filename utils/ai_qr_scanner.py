@@ -18,7 +18,6 @@ import ctypes
 import numpy as np
 import os
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from utils.qr_payload import is_kuro_qr, normalise_qr_text

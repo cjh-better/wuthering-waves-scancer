@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Performance monitoring system for QR code scanning"""
 import time
-from typing import Dict, List, Optional
-from dataclasses import dataclass, field
+from typing import List, Optional
+from dataclasses import dataclass
 from collections import defaultdict
 
 
