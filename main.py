@@ -98,10 +98,12 @@ def main():
             _lock_f = None
     except Exception:
         # 已有实例在运行（exe 无控制台，print 不可见，用弹窗提示）
+        # 注意：不能在此处 from import QApplication，会使其变为函数
+        # 局部变量，导致后文引用报 UnboundLocalError；用模块级导入
         try:
-            from PySide6.QtWidgets import QApplication, QMessageBox
+            from PySide6.QtWidgets import QMessageBox as _QMB
             _app = QApplication([])
-            QMessageBox.warning(None, "提示", "鸣潮抢码器已在运行中，无需多开。")
+            _QMB.warning(None, "提示", "鸣潮抢码器已在运行中，无需多开。")
         except Exception:
             pass
         return

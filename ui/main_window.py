@@ -6,7 +6,7 @@ import platform
 from datetime import datetime
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QMessageBox, QLineEdit,
     QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QComboBox, QMenu, QAbstractItemView,
@@ -1145,8 +1145,7 @@ class MainWindow(QMainWindow):
             from ui.floating_status import FloatingStatusWindow
             self._floating_win = FloatingStatusWindow()
             self._floating_win.set_status_provider(self._get_floating_status)
-            # 默认放在右上角
-            from PySide6.QtWidgets import QApplication
+            # 默认放在右上角（QApplication 已在模块顶层导入）
             screen = QApplication.primaryScreen().availableGeometry()
             self._floating_win.move(screen.width() - 240, 40)
         if self._floating_win.isVisible():
