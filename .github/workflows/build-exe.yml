@@ -29,4 +29,5 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v3.1.0
           files: dist/*.exe
