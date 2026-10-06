@@ -331,20 +331,20 @@ class TestShortQRCodeHandling:
 class TestFastFrameDecodeAndPayload:
     """Competitive live scanning path: decode BGR frames directly."""
 
-    def test_scan_frame_uses_ai_array_fast_path(self):
+    def test_scan_frame_uses_unified_decode_contract(self):
+        # _scan_frame now goes through the unified decode(image) contract
+        # (ImageDecoder); the ndarray fast path lives inside AIQRScanner.
         scanner = LiveStreamScanner()
         dummy = _make_dummy_frame()
         fake_ai = MagicMock()
-        fake_ai.try_decode_array.return_value = "G152#KURO_FAST"
+        fake_ai.decode.return_value = "G152#KURO_FAST"
 
         fake_module = types.SimpleNamespace(ai_qr_scanner=fake_ai)
         with patch.dict(sys.modules, {"utils.ai_qr_scanner": fake_module}):
             result = scanner._scan_frame(dummy)
 
         assert result == "G152#KURO_FAST"
-        fake_ai.try_decode_array.assert_called_once()
-        _, kwargs = fake_ai.try_decode_array.call_args
-        assert kwargs["color"] == "BGR"
+        fake_ai.decode.assert_called_once_with(dummy)
 
     def test_same_ticket_with_different_url_is_emitted_once(self):
         dummy = _make_dummy_frame()
@@ -730,25 +730,44 @@ class TestDouyinHtmlFallback:
         assert LiveStreamScanner._extract_flv_from_html("") == ""
         assert LiveStreamScanner._extract_flv_from_html("<html></html>") == ""
 
-    def test_empty_api_body_falls_back_to_html(self):
+    def test_room_page_with_stream_returns_immediately(self):
+        # New flow: the room page is fetched first (for ttwid + embedded
+        # JSON).  When it already contains a stream URL, the signed API
+        # is never called.
         scanner = LiveStreamScanner()
         with patch.object(scanner, "_session") as mock_session:
-            mock_session.get.side_effect = [
-                _http_resp(200, ""),  # web/enter API: empty body (wind-control)
-                _http_resp(200, _HTML_WITH_FLV),  # room HTML page
-            ]
+            mock_session.get.return_value = _http_resp(200, _HTML_WITH_FLV)
             info = scanner._get_douyin_stream_info("123456")
 
         assert info.status == LiveStreamStatus.Normal
         assert info.url == _EXPECTED_FLV
-        assert mock_session.get.call_count == 2
+        assert mock_session.get.call_count == 1
+
+    def test_empty_api_body_falls_back_to_html(self):
+        # Legacy name kept: documents the original #6/#7 symptom
+        # (web/enter returning HTTP 200 with an empty body).
+        scanner = LiveStreamScanner()
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.side_effect = [
+                _http_resp(200, _HTML_WITHOUT_STREAM),  # room page: no stream
+                _http_resp(200, ""),  # signed web/enter API: empty (wind-control)
+            ]
+            info = scanner._get_douyin_stream_info("123456")
+
+        assert info.status == LiveStreamStatus.Error
+        assert "HTML备用通道" in info.detail
+        assert "疑似被风控" in info.detail  # API-side reason is preserved
+        # Room page was fetched before the API (ttwid + fast path).
+        first_url = mock_session.get.call_args_list[0][0][0]
+        assert "live.douyin.com/123456" in first_url
+        assert "web/enter" not in first_url
 
     def test_html_without_stream_data_reports_clear_detail(self):
         scanner = LiveStreamScanner()
         with patch.object(scanner, "_session") as mock_session:
             mock_session.get.side_effect = [
-                _http_resp(200, ""),
-                _http_resp(200, _HTML_WITHOUT_STREAM),
+                _http_resp(200, _HTML_WITHOUT_STREAM),  # room page first
+                _http_resp(200, ""),  # signed API: empty body
             ]
             info = scanner._get_douyin_stream_info("123456")
 
@@ -760,24 +779,29 @@ class TestDouyinHtmlFallback:
         scanner = LiveStreamScanner()
         with patch.object(scanner, "_session") as mock_session:
             mock_session.get.side_effect = [
-                _http_resp(403, ""),
-                _http_resp(403, ""),
+                _http_resp(200, _HTML_WITHOUT_STREAM),  # room page first
+                _http_resp(403, ""),  # signed API
             ]
             info = scanner._get_douyin_stream_info("123456")
 
         assert info.status == LiveStreamStatus.Error
         assert "HTTP 403" in info.detail
 
-    def test_api_absent_is_authoritative_no_html_fetch(self):
+    def test_api_absent_is_authoritative(self):
+        # The room page is always fetched first (ttwid bootstrap), but an
+        # authoritative API answer ("absent") ends the lookup – no retry.
         scanner = LiveStreamScanner()
         api = _http_resp(200, json.dumps({"status_code": 40001, "data": {}}))
         with patch.object(scanner, "_session") as mock_session:
-            mock_session.get.return_value = api
+            mock_session.get.side_effect = [
+                _http_resp(200, _HTML_WITHOUT_STREAM),  # room page first
+                api,  # signed API: authoritative absent
+            ]
             info = scanner._get_douyin_stream_info("123456")
 
         assert info.status == LiveStreamStatus.Absent
         assert "房间不存在" in info.detail
-        assert mock_session.get.call_count == 1  # no HTML fallback attempted
+        assert mock_session.get.call_count == 2  # room page + API, nothing more
 
     def test_api_not_live_is_authoritative(self):
         scanner = LiveStreamScanner()
@@ -791,11 +815,14 @@ class TestDouyinHtmlFallback:
             ),
         )
         with patch.object(scanner, "_session") as mock_session:
-            mock_session.get.return_value = api
+            mock_session.get.side_effect = [
+                _http_resp(200, _HTML_WITHOUT_STREAM),  # room page first
+                api,  # signed API: authoritative not-live
+            ]
             info = scanner._get_douyin_stream_info("123456")
 
         assert info.status == LiveStreamStatus.NotLive
-        assert mock_session.get.call_count == 1
+        assert mock_session.get.call_count == 2
 
     def test_bilibili_http_error_carries_detail(self):
         scanner = LiveStreamScanner()

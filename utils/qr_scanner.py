@@ -2,7 +2,7 @@
 """二维码扫描器 - 增强版（支持图像预处理和多次识别）"""
 from PIL import ImageGrab, Image, ImageEnhance
 from pyzbar.pyzbar import decode
-from typing import Optional, List
+from typing import Optional, List, Protocol, runtime_checkable
 import ctypes
 import numpy as np
 
@@ -11,6 +11,21 @@ from utils.log import get_logger
 
 
 logger = get_logger("QR")
+
+
+@runtime_checkable
+class ImageDecoder(Protocol):
+    """统一解码契约：``decode(image) -> str | None``。
+
+    ``image`` 可为 ``PIL.Image`` 或 ``numpy.ndarray``（BGR/RGB/GRAY
+    均可）；返回解码出的二维码文本，无结果时返回 ``None``，永不抛异常。
+    ``QRScanner`` 与 ``AIQRScanner`` 都实现该契约，调用方无需关心
+    具体用哪种解码器。
+    """
+
+    def decode(self, image) -> Optional[str]:
+        ...
+
 
 # 尝试导入OpenCV，如果没有就使用基础版本
 try:
@@ -121,6 +136,28 @@ class QRScanner:
         
         return enhanced_images
     
+    def decode(self, image) -> Optional[str]:
+        """统一解码契约（见 :class:`ImageDecoder`）。
+
+        接受 ``PIL.Image`` 或 ``numpy.ndarray``；ndarray 按 BGR 理解
+        （OpenCV 默认）并在内部转 RGB。
+        """
+        try:
+            if image is None:
+                return None
+            if isinstance(image, Image.Image):
+                return self.try_decode_qr(image)
+            arr = np.asarray(image)
+            if arr.size == 0 or 0 in arr.shape:
+                return None
+            if OPENCV_AVAILABLE and arr.ndim == 3:
+                rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+            else:
+                rgb = arr
+            return self.try_decode_qr(Image.fromarray(rgb))
+        except Exception:
+            return None
+
     def try_decode_qr(self, img: Image.Image) -> Optional[str]:
         """
         尝试解码单张图片的QR码

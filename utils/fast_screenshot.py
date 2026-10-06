@@ -18,6 +18,8 @@ logger = get_logger("FastScreenshot")
 
 class FastScreenshot:
     """Windows BitBlt快速截图工具"""
+
+    name = "BitBlt"  # ScreenshotBackend contract (see utils.screenshot)
     
     def __init__(self):
         """初始化截图工具"""

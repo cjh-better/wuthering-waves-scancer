@@ -86,6 +86,9 @@ def main():
         get_logger("Main").info(
             "崩溃日志路径：%s（闪退时请把此文件贴到 issue）", crash_log_path()
         )
+        # 打包资源完整性自检（模型缺失 → 明确告警 + 降级，不闪退）
+        from utils.resources import log_resource_status
+        log_resource_status()
     except Exception:
         pass
 

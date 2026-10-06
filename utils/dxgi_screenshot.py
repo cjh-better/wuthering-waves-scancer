@@ -30,6 +30,8 @@ except ImportError:
 
 class DXGIScreenshot:
     """DXGI快速截图工具（GPU加速，与MHY_Scanner相同）"""
+
+    name = "DXGI"  # ScreenshotBackend contract (see utils.screenshot)
     
     def __init__(self):
         """初始化DXGI截图工具"""
