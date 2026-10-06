@@ -1547,7 +1547,16 @@ class MainWindow(QMainWindow):
 
             if "Token已过期" in message:
                 self._bring_to_front()
-                QMessageBox.warning(self, "提示", "登录已过期，右键该账号 → 重新获取Token 可一键续期！")
+                # 一键续期：直接给"立即续期"按钮，不用用户去找右键菜单
+                box = QMessageBox(self)
+                box.setWindowTitle("登录已过期")
+                box.setIcon(QMessageBox.Warning)
+                box.setText("当前账号登录已过期，是否立即一键续期？")
+                renew_btn = box.addButton("立即续期", QMessageBox.AcceptRole)
+                box.addButton("稍后", QMessageBox.RejectRole)
+                box.exec()
+                if box.clickedButton() == renew_btn:
+                    self._on_refresh_account_token()
 
             # 只在窗口可见时重置：右键关闭扫码窗后引用不会置 None，
             # 无守卫会在隐藏窗口上重启定时器，造成"幽灵截图+幽灵登录"

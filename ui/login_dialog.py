@@ -14,18 +14,29 @@ class LoginDialog(QDialog):
     
     login_success = Signal(dict)  # 登录成功信号
     
+    COUNTDOWN_SECONDS = 60
+
     def __init__(self, parent=None, mobile: str = ""):
         super().__init__(parent)
         self.setWindowTitle("登录")
-        self.setFixedSize(450, 420)
+        self.setFixedSize(450, 460)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
         self.step = 1  # 当前步骤：1=输入手机号，2=输入验证码
         self.phone_number = ""  # 保存的手机号
+        self._remaining = 0  # 重发倒计时
         self.setup_ui()
-        if mobile:
-            # 一键续期场景：直接填入已保存的手机号
-            self.phone_input.setText(mobile)
         self.apply_styles()
+
+        # 倒计时定时器（验证码重发）
+        from PySide6.QtCore import QTimer
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick_countdown)
+
+        if mobile:
+            # 一键续期场景：预填手机号并自动发送验证码
+            self.phone_input.setText(mobile)
+            QTimer.singleShot(300, self._auto_send_for_renew)
     
     def setup_ui(self):
         """设置 UI"""
@@ -97,6 +108,14 @@ class LoginDialog(QDialog):
         self.main_btn.clicked.connect(self.on_main_btn_click)
         layout.addWidget(self.main_btn)
         
+        # 重新发送按钮（第二步显示，带倒计时）
+        self.resend_btn = QPushButton("重新发送")
+        self.resend_btn.setFixedHeight(40)
+        self.resend_btn.setObjectName("backBtn")
+        self.resend_btn.clicked.connect(self._on_resend)
+        layout.addWidget(self.resend_btn)
+        self.resend_btn.hide()
+
         # 返回按钮（初始隐藏）
         self.back_btn = QPushButton("← 返回")
         self.back_btn.setFixedHeight(44)
@@ -204,8 +223,74 @@ class LoginDialog(QDialog):
         self.phone_container.hide()
         self.code_container.show()
         self.main_btn.setText("登录")
+        self.resend_btn.show()
         self.back_btn.show()
         self.code_input.setFocus()
+        self._start_countdown()
+
+    # ------------------------------------------------------------------
+    # 验证码重发倒计时
+    # ------------------------------------------------------------------
+    def _auto_send_for_renew(self):
+        """一键续期场景：打开后自动发送验证码，省一次点击。"""
+        if self.step == 1 and self.phone_input.text().strip():
+            self.on_main_btn_click()
+
+    def _on_resend(self):
+        """重新发送验证码（倒计时结束后可点）。"""
+        if self._remaining > 0 or self.step != 2:
+            return
+        phone = self.phone_number
+        if not phone:
+            return
+        self.resend_btn.setEnabled(False)
+        self.resend_btn.setText("发送中...")
+        try:
+            from utils.kuro_api import kuro_api
+            result = kuro_api.send_sms_code(phone)
+        finally:
+            pass
+        if result.get("code") == 200 and not result.get("need_geetest"):
+            self._start_countdown()
+        elif result.get("need_geetest"):
+            if self._solve_geetest_and_retry(phone):
+                return
+            self.resend_btn.setEnabled(True)
+            self.resend_btn.setText("重新发送")
+        else:
+            msg = result.get("msg", "发送失败")
+            # 发送频繁等可恢复错误：给明确指引而非干巴巴报错
+            hint = self._friendly_sms_error(msg)
+            QMessageBox.warning(self, "发送失败", hint)
+            self.resend_btn.setEnabled(True)
+            self.resend_btn.setText("重新发送")
+
+    def _start_countdown(self):
+        """启动 60 秒重发倒计时。"""
+        self._remaining = self.COUNTDOWN_SECONDS
+        self.resend_btn.setEnabled(False)
+        self._tick_countdown()
+        self._timer.start()
+
+    def _tick_countdown(self):
+        if self._remaining <= 0:
+            self._timer.stop()
+            self.resend_btn.setEnabled(True)
+            self.resend_btn.setText("重新发送")
+        else:
+            self.resend_btn.setText(f"重新发送({self._remaining}s)")
+            self._remaining -= 1
+
+    def _friendly_sms_error(self, msg: str) -> str:
+        """把服务端错误翻译成用户能懂的指引。"""
+        m = (msg or "").lower()
+        if "频繁" in m or "frequency" in m or "too many" in m:
+            return f"发送太频繁，请{self.COUNTDOWN_SECONDS}秒后再试。\n\n(服务端：{msg})"
+        if "无效" in m or "invalid" in m:
+            return f"手机号无效，请检查后重试。\n\n(服务端：{msg})"
+        if "上限" in m or "limit" in m:
+            return f"今日发送次数已达上限，请明天再试或走浏览器手动获取。\n\n(服务端：{msg})"
+        return msg
 
     def _solve_geetest_and_retry(self, phone: str) -> bool:
         """极验滑块验证，通过后重试发送短信。成功返回 True。"""

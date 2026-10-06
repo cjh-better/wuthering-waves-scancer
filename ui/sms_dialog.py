@@ -45,7 +45,7 @@ class SmsDialog(QDialog):
 
     def __init__(self, token: str, mobile: str, parent=None):
         super().__init__(parent)
-        self.token = token
+        # token 参数已废弃：send_sms 走 session 统一鉴权，此处保留仅为调用兼容
         self.mobile = mobile
         self._sms_code = ""
         self._auto_login = False
