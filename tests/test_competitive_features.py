@@ -234,7 +234,6 @@ class TestSmsDialog:
             try:
                 if dlg._sms_worker:
                     assert dlg._sms_worker.wait(5000)
-                from PySide6.QtWidgets import QApplication
                 QApplication.processEvents()
                 assert dlg.send_btn.isEnabled() is False
                 assert "重新发送" in dlg.send_btn.text()

@@ -173,7 +173,6 @@ class TestBilibiliAdapter:
 
 class TestDouyinAdapter:
     def setup_method(self):
-        from utils.platforms.douyin import DouyinAdapter
         DouyinAdapter.reset_api_health()
         from utils.platforms.base import clear_stream_url_cache
         clear_stream_url_cache()

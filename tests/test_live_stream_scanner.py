@@ -38,7 +38,6 @@ def _fast_give_up_reconnect(monkeypatch):
     依赖“线程自己退出”，不 mock 会导致 wait() 超时、线程泄漏。
     测熔断本身的用例（TestReconnectCircuitBreaker）会显式覆盖此 mock。
     """
-    from utils.live_stream_scanner import LiveStreamScanner
     monkeypatch.setattr(
         LiveStreamScanner, "_reconnect_config", lambda self: (0.01, 1)
     )
@@ -50,6 +49,7 @@ from utils.live_stream_scanner import (
     LiveStreamInfo,
     LiveStreamStatus,
     DEFAULT_SCAN_FRAME_STRIDE,
+    _FFMPEG_LOW_LATENCY_OPTS,
 )
 from utils.qr_payload import extract_kuro_ticket, is_kuro_qr
 
@@ -877,21 +877,18 @@ class TestDouyinHtmlFallback:
         assert any("疑似被风控" in e for e in errors)
 class TestFFmpegOpts:
     def test_default_opts_have_timeout(self):
-        from utils.live_stream_scanner import LiveStreamScanner
         opts = LiveStreamScanner._ffmpeg_opts()
         assert "timeout;" in opts  # 连接 IO 超时，防止无限挂起
         assert "probesize;" in opts
 
     def test_custom_opts_override(self, monkeypatch):
         from utils import config_manager as cm_mod
-        from utils.live_stream_scanner import LiveStreamScanner
         mgr = cm_mod.config_manager
         monkeypatch.setattr(mgr, "get", lambda k, d="": "probesize;4096" if k == "live_ffmpeg_opts" else d)
         assert LiveStreamScanner._ffmpeg_opts() == "probesize;4096"
 
     def test_blank_opts_fall_back_to_default(self, monkeypatch):
         from utils import config_manager as cm_mod
-        from utils.live_stream_scanner import LiveStreamScanner, _FFMPEG_LOW_LATENCY_OPTS
         mgr = cm_mod.config_manager
         monkeypatch.setattr(mgr, "get", lambda k, d="": "   ")
         assert LiveStreamScanner._ffmpeg_opts() == _FFMPEG_LOW_LATENCY_OPTS
@@ -901,7 +898,6 @@ class TestReconnectCircuitBreaker:
     """两阶段重连：突发失败后转入熔断慢轮询，而非直接放弃。"""
 
     def _scanner(self):
-        from utils.live_stream_scanner import LiveStreamScanner
         s = LiveStreamScanner()
         s.is_running = True
         return s
@@ -936,7 +932,6 @@ class TestReconnectCircuitBreaker:
         assert s._try_reconnect("http://x/live.flv") is False
 
     def test_interruptible_sleep_wakes_on_stop(self):
-        import threading
         s = self._scanner()
         def stopper():
             import time as _t

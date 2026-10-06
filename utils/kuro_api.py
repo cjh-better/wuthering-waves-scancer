@@ -152,7 +152,6 @@ class KuroAPI:
         """
         try:
             import threading
-            import socket
             from urllib.parse import urlparse
             host = urlparse(url).hostname
             if not host:

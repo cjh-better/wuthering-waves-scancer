@@ -292,8 +292,7 @@ class MainWindow(QMainWindow):
         self._setup_log_section(main_layout)
 
         # 入场动效：三卡片 stagger 纯透明度淡入（不碰几何，与布局无冲突）
-        from PySide6.QtCore import QTimer as _QTimer
-        _QTimer.singleShot(60, self._play_entrance_animations)
+        QTimer.singleShot(60, self._play_entrance_animations)
 
     def _play_entrance_animations(self) -> None:
         """播放三卡片的 stagger 入场动画。"""
@@ -332,7 +331,7 @@ class MainWindow(QMainWindow):
         只做 opacity（QGraphicsOpacityEffect 仅影响绘制，不碰几何），
         不动画 pos——layout 管理的 widget 动 pos 会与布局打架导致错位。
         """
-        from PySide6.QtCore import QPropertyAnimation, QEasingCurve, QTimer
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
         from PySide6.QtWidgets import QGraphicsOpacityEffect
 
         def _start():
@@ -1077,7 +1076,6 @@ class MainWindow(QMainWindow):
     def _ensure_sched_timer(self) -> None:
         """确保定时检查器在运行（30秒检查一次）。"""
         if getattr(self, "_sched_timer", None) is None:
-            from PySide6.QtCore import QTimer
             self._sched_timer = QTimer(self)
             self._sched_timer.timeout.connect(self._check_scheduled_grab)
             self._sched_timer.start(30_000)
@@ -1092,7 +1090,6 @@ class MainWindow(QMainWindow):
         if not t_str:
             return
         try:
-            from datetime import datetime
             now = datetime.now().strftime("%H:%M")
             if now != t_str:
                 return
@@ -1134,7 +1131,6 @@ class MainWindow(QMainWindow):
                 return
             self.add_log(f"⚠️ 检测到上次崩溃退出，自动恢复监控: {room_id} ({platform})")
             # 延迟 3 秒启动，等 UI 完全就绪
-            from PySide6.QtCore import QTimer
             QTimer.singleShot(3000, lambda: self._start_live_scan_with_room_id(room_id, platform))
         except Exception as e:
             self.add_log(f"崩溃恢复失败: {e}")
