@@ -715,6 +715,13 @@ class LiveStreamScanner(QThread):
 
         stream_url = info.url
 
+        # L4：预解析实际流地址的 host（后台线程），与硬编码列表互补
+        try:
+            from utils.kuro_api import kuro_api as _kuro
+            _kuro.pre_resolve_host(stream_url)
+        except Exception:
+            pass
+
         # 打开视频流
         # M1修复：先赋局部变量再持锁赋值，避免与 stop()/_release_cap 竞态
         #（不要持锁做网络 open，会阻塞 stop）

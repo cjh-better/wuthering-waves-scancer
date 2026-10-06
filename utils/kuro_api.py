@@ -139,6 +139,28 @@ class KuroAPI:
             threading.Thread(target=resolve, daemon=True).start()
         except Exception:
             pass
+
+    def pre_resolve_host(self, url: str) -> None:
+        """L4：从实际流地址提取 host 做预解析（后台线程，不阻塞）。
+
+        硬编码的边缘节点可能变更，实际流地址的 host 是最准确的；
+        两者互补，保守保留原有列表。
+        """
+        try:
+            import threading
+            import socket
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname
+            if not host:
+                return
+            def _resolve():
+                try:
+                    socket.gethostbyname(host)
+                except Exception:
+                    pass
+            threading.Thread(target=_resolve, daemon=True).start()
+        except Exception:
+            pass
     
     @staticmethod
     def _load_timeout_ladder(key: str, default: list) -> list:
