@@ -1,12 +1,33 @@
 # -*- coding: utf-8 -*-
 """登录对话框"""
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout,
     QLabel, QLineEdit, QPushButton, QMessageBox,
     QWidget
 )
 from PySide6.QtGui import QFont
+
+
+class SmsCodeSendWorker(QThread):
+    """后台发送短信验证码（send_sms_code 是同步网络请求，放 UI 线程会卡几秒）。"""
+
+    done = Signal(dict)
+
+    def __init__(self, mobile: str, geetest_data: str = "", parent=None):
+        super().__init__(parent)
+        self.mobile = mobile
+        self.geetest_data = geetest_data
+
+    def run(self):
+        try:
+            from utils.kuro_api import kuro_api
+            result = kuro_api.send_sms_code(self.mobile, geetest_data=self.geetest_data)
+            if not isinstance(result, dict):
+                result = {"code": -1, "msg": "发送失败", "need_geetest": False}
+        except Exception as e:
+            result = {"code": -1, "msg": f"发送失败: {e}", "need_geetest": False}
+        self.done.emit(result)
 
 
 class LoginDialog(QDialog):
@@ -33,10 +54,20 @@ class LoginDialog(QDialog):
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._tick_countdown)
 
+        self._sms_worker = None  # 后台短信发送线程
         if mobile:
             # 一键续期场景：预填手机号并自动发送验证码
             self.phone_input.setText(mobile)
             QTimer.singleShot(300, self._auto_send_for_renew)
+        else:
+            # #5 记住上次手机号：自动填入上次登录成功的手机号
+            try:
+                from utils.config_manager import config_manager
+                last = config_manager.get("last_login_phone", "")
+                if last:
+                    self.phone_input.setText(last)
+            except Exception:
+                pass
     
     def setup_ui(self):
         """设置 UI"""
@@ -160,32 +191,8 @@ class LoginDialog(QDialog):
 
             self.phone_number = phone
 
-            # 禁用按钮防重复点击
-            self.main_btn.setEnabled(False)
-            self.main_btn.setText("发送中...")
-
-            try:
-                from utils.kuro_api import kuro_api
-                result = kuro_api.send_sms_code(phone)
-            finally:
-                self.main_btn.setEnabled(True)
-                self.main_btn.setText("获取验证码")
-
-            if result.get("code") == 200 and not result.get("need_geetest"):
-                # API 发送成功，直接进第二步
-                self._goto_step2(phone)
-                return
-
-            if result.get("need_geetest"):
-                # 触发极验：弹滑块验证，通过后重试
-                if self._solve_geetest_and_retry(phone):
-                    return
-                # 滑块失败/取消 → 降级走浏览器
-            else:
-                self._log_sms_fallback(result.get("msg", "发送失败"))
-
-            # 降级：打开官网手动获取（原流程保留）
-            self._fallback_to_browser(phone)
+            # #4 后台线程发送短信，不卡 UI
+            self._start_sms_worker(phone)
         else:
             # 第二步：执行登录
             code = self.code_input.text().strip()
@@ -214,6 +221,52 @@ class LoginDialog(QDialog):
                 self.main_btn.setEnabled(True)
                 self.main_btn.setText("登录")
                 self.back_btn.setEnabled(True)
+                # #6 输错不丢进度：留在第二步，自动全选错误验证码，直接敲新码覆盖
+                self.code_input.setFocus()
+                self.code_input.selectAll()
+
+    # ------------------------------------------------------------------
+    # 后台短信发送
+    # ------------------------------------------------------------------
+    def _start_sms_worker(self, phone: str, geetest_data: str = ""):
+        """起后台线程发送验证码（防重复点击）。"""
+        if self._sms_worker and self._sms_worker.isRunning():
+            return
+        self.main_btn.setEnabled(False)
+        self.main_btn.setText("发送中...")
+        self._sms_worker = SmsCodeSendWorker(phone, geetest_data, parent=self)
+        self._sms_worker.done.connect(self._on_sms_sent)
+        self._sms_worker.finished.connect(self._on_sms_worker_finished)
+        self._sms_worker.start()
+
+    def _on_sms_worker_finished(self):
+        self._sms_worker = None
+
+    def _on_sms_sent(self, result: dict):
+        """后台发送完成（UI 线程）：成功进第二步 / 极验 / 降级。"""
+        phone = self.phone_number
+        self.main_btn.setEnabled(True)
+        self.main_btn.setText("获取验证码")
+
+        if result.get("code") == 200 and not result.get("need_geetest"):
+            self._goto_step2(phone)
+            return
+
+        if result.get("need_geetest"):
+            if self._solve_geetest_and_retry(phone):
+                return
+        else:
+            self._log_sms_fallback(result.get("msg", "发送失败"))
+
+        self._fallback_to_browser(phone)
+
+    def closeEvent(self, event):
+        if self._sms_worker and self._sms_worker.isRunning():
+            try:
+                self._sms_worker.wait(5000)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     def _goto_step2(self, phone: str):
         """切换到第二步：输入验证码"""
@@ -225,7 +278,17 @@ class LoginDialog(QDialog):
         self.main_btn.setText("登录")
         self.resend_btn.show()
         self.back_btn.show()
+        # #3 剪贴板有验证码自动填入（收到短信复制后回来直接填好）
+        try:
+            import re
+            from PySide6.QtWidgets import QApplication
+            clip = (QApplication.clipboard().text() or "").strip()
+            if re.fullmatch(r"\d{4,6}", clip):
+                self.code_input.setText(clip)
+        except Exception:
+            pass
         self.code_input.setFocus()
+        self.code_input.selectAll()
         self._start_countdown()
 
     # ------------------------------------------------------------------
@@ -245,21 +308,25 @@ class LoginDialog(QDialog):
             return
         self.resend_btn.setEnabled(False)
         self.resend_btn.setText("发送中...")
-        try:
-            from utils.kuro_api import kuro_api
-            result = kuro_api.send_sms_code(phone)
-        finally:
-            pass
+        # 后台线程重发，结果走 _on_resend_sent
+        if self._sms_worker and self._sms_worker.isRunning():
+            return
+        self._sms_worker = SmsCodeSendWorker(phone, parent=self)
+        self._sms_worker.done.connect(self._on_resend_sent)
+        self._sms_worker.finished.connect(self._on_sms_worker_finished)
+        self._sms_worker.start()
+
+    def _on_resend_sent(self, result: dict):
+        """后台重发完成（UI 线程）。"""
         if result.get("code") == 200 and not result.get("need_geetest"):
             self._start_countdown()
         elif result.get("need_geetest"):
-            if self._solve_geetest_and_retry(phone):
+            if self._solve_geetest_and_retry(self.phone_number):
                 return
             self.resend_btn.setEnabled(True)
             self.resend_btn.setText("重新发送")
         else:
             msg = result.get("msg", "发送失败")
-            # 发送频繁等可恢复错误：给明确指引而非干巴巴报错
             hint = self._friendly_sms_error(msg)
             QMessageBox.warning(self, "发送失败", hint)
             self.resend_btn.setEnabled(True)
@@ -306,12 +373,9 @@ class LoginDialog(QDialog):
         geetest_data = json.dumps(validate) if validate else ""
         if not geetest_data:
             return False
-        from utils.kuro_api import kuro_api
-        result = kuro_api.send_sms_code(phone, geetest_data=geetest_data)
-        if result.get("code") == 200 and not result.get("need_geetest"):
-            self._goto_step2(phone)
-            return True
-        return False
+        # 后台线程带验证数据重发
+        self._start_sms_worker(phone, geetest_data=geetest_data)
+        return True  # 结果走 _on_sms_sent（成功进第二步，失败降级浏览器）
 
     def _log_sms_fallback(self, reason: str):
         """记录 API 发送失败原因（调试用）。"""

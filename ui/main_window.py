@@ -258,6 +258,8 @@ class MainWindow(QMainWindow):
         self._load_accounts_to_table()
         self._load_saved_config()
         self._auto_start_if_configured()
+        # 启动 3 秒后自动校验所有账号 token（后台线程，不阻塞 UI）
+        QTimer.singleShot(3000, lambda: self.refresh_account_statuses(quiet=True))
         # 定时抢码：启动时若已启用，启动检查器
         if config_manager.get("scheduled_grab_enabled", False):
             self._ensure_sched_timer()
@@ -422,6 +424,7 @@ class MainWindow(QMainWindow):
         self.account_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.account_table.customContextMenuRequested.connect(self._show_account_context_menu)
         self.account_table.cellClicked.connect(self._on_account_selected)
+        self.account_table.cellDoubleClicked.connect(self._on_account_double_clicked)
         self.account_table.itemChanged.connect(self._on_note_edited)
         info_layout.addWidget(self.account_table)
 
@@ -482,12 +485,18 @@ class MainWindow(QMainWindow):
         if item.column() == 4:
             account_manager.set_account_note(item.row(), item.text())
 
-    def refresh_account_statuses(self):
-        """异步刷新账号状态，避免阻塞主窗口。"""
+    def refresh_account_statuses(self, quiet: bool = False):
+        """异步刷新账号状态，避免阻塞主窗口。
+
+        Args:
+            quiet: True 则不打"开始/没有账号"日志（用于启动自动校验）。
+        """
         if account_manager.size() == 0:
-            self.add_log("没有可刷新的账号")
+            if not quiet:
+                self.add_log("没有可刷新的账号")
             return
-        self.add_log("开始刷新账号状态...")
+        if not quiet:
+            self.add_log("开始刷新账号状态...")
         self.account_check_threads = [
             t for t in self.account_check_threads if t.isRunning()
         ]
@@ -529,6 +538,13 @@ class MainWindow(QMainWindow):
 
     def _on_account_selected(self, row: int, _col: int):
         self._activate_account(row)
+
+    def _on_account_double_clicked(self, row: int, _col: int):
+        """双击账号行：选中并直接开始扫码（快速操作）。"""
+        self._activate_account(row)
+        # 延迟一点等选中生效，再走扫码前的 token 预检
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(200, self.on_start_scan)
 
     def _activate_account(self, index: int):
         """选中某个账号作为当前活跃账号"""
@@ -940,6 +956,10 @@ class MainWindow(QMainWindow):
         name = data.get("userName", uid)
         mobile = data.get("mobile", "")
 
+        # #5 记住上次登录成功的手机号，下次添加账号自动填入
+        if mobile:
+            config_manager.set("last_login_phone", mobile)
+
         if account_manager.has_uid(uid):
             # 已存在 → 更新 token
             idx = account_manager.find_index_by_uid(uid)
@@ -1024,6 +1044,24 @@ class MainWindow(QMainWindow):
         """开始屏幕扫码"""
         if self.selected_account_index == -1:
             QMessageBox.warning(self, "提示", "请先选择一个账号！")
+            return
+
+        # 扫码前预检：账号已标记过期 → 直接弹一键续期，不浪费一次扫码
+        try:
+            _pre_status = account_manager.get_account_status(self.selected_account_index)
+        except Exception:
+            _pre_status = ""
+        if _pre_status == "过期":
+            self.add_log("⚠ 当前账号Token已过期，先续期再扫码")
+            box = QMessageBox(self)
+            box.setWindowTitle("Token已过期")
+            box.setIcon(QMessageBox.Warning)
+            box.setText("当前账号登录已过期，是否立即一键续期？")
+            renew_btn = box.addButton("立即续期", QMessageBox.AcceptRole)
+            box.addButton("取消", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() == renew_btn:
+                self._on_refresh_account_token()
             return
 
         token = account_manager.get_account_token(self.selected_account_index)
