@@ -24,7 +24,8 @@ def normalise_qr_text(value: object) -> str:
 
 def is_kuro_qr(value: object) -> bool:
     """True when the decoded QR payload looks like a Kuro login QR."""
-    text = normalise_qr_text(value)
+    # 避免重复归一化：若已是 str 直接用
+    text = value if isinstance(value, str) else normalise_qr_text(value)
     upper_text = text.upper()
     return any(marker in upper_text for marker in KURO_MARKERS)
 
