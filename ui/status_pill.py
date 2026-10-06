@@ -72,6 +72,10 @@ class StatusPill(QWidget):
             text: 状态文字
             mode: idle（灰）/ active（青，呼吸）/ working（金，呼吸）
         """
+        # U4优化：相同状态不重复应用样式，避免触发不必要的 repaint
+        if getattr(self, "_last_status", None) == (text, mode):
+            return
+        self._last_status = (text, mode)
         self._label.setText(text)
         if mode == "active":
             self._dot_color = (62, 214, 164)  # 青
