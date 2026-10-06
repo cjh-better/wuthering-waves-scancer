@@ -270,6 +270,7 @@ QPushButton#ghostBtn, QPushButton#clearBtn {{
     color: {p['TEXT_SECONDARY']};
     border: 1px solid {p['BORDER']};
     font-weight: 500;
+    padding: 6px 16px;
 }}
 QPushButton#ghostBtn:hover, QPushButton#clearBtn:hover {{
     background-color: {p['GHOST_HOVER_BG']};
@@ -291,6 +292,30 @@ QPushButton#themeBtn {{
     font-weight: 500;
 }}
 QPushButton#themeBtn:hover {{
+    background-color: {p['GHOST_HOVER_BG']};
+    color: {p['TEXT_PRIMARY']};
+}}
+
+/* 返回按钮（登录对话框） */
+QPushButton#backBtn {{
+    background-color: {p['GHOST_HOVER_BG']};
+    color: {p['TEXT_SECONDARY']};
+    border: 1px solid {p['BORDER']};
+    font-weight: 500;
+}}
+QPushButton#backBtn:hover {{
+    background-color: {p['GHOST_PRESSED_BG']};
+    color: {p['TEXT_PRIMARY']};
+}}
+
+/* 取消按钮（短信对话框） */
+QPushButton#cancelBtn {{
+    background-color: transparent;
+    color: {p['TEXT_SECONDARY']};
+    border: 1px solid {p['BORDER']};
+    font-weight: 500;
+}}
+QPushButton#cancelBtn:hover {{
     background-color: {p['GHOST_HOVER_BG']};
     color: {p['TEXT_PRIMARY']};
 }}

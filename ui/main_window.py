@@ -386,13 +386,13 @@ class MainWindow(QMainWindow):
 
         add_btn = QPushButton("＋ 添加账号")
         add_btn.setObjectName("loginBtn")
-        add_btn.setFixedHeight(36)
+        add_btn.setMinimumHeight(34)
         add_btn.setMinimumWidth(120)
         add_btn.clicked.connect(self.on_add_account)
         header.addWidget(add_btn)
 
         refresh_btn = QPushButton("刷新状态")
-        refresh_btn.setFixedHeight(36)
+        refresh_btn.setMinimumHeight(34)
         refresh_btn.setFixedWidth(100)
         refresh_btn.clicked.connect(self.refresh_account_statuses)
         header.addWidget(refresh_btn)
@@ -737,19 +737,19 @@ class MainWindow(QMainWindow):
 
         self.room_monitor_btn = QPushButton("开播监控")
         self.room_monitor_btn.setObjectName("ghostBtn")
-        self.room_monitor_btn.setFixedHeight(36)
+        self.room_monitor_btn.setMinimumHeight(30)
         self.room_monitor_btn.clicked.connect(self.on_open_room_monitor)
         live_tools_layout.addWidget(self.room_monitor_btn)
 
         self.grab_stats_btn = QPushButton("抢码战绩")
         self.grab_stats_btn.setObjectName("ghostBtn")
-        self.grab_stats_btn.setFixedHeight(36)
+        self.grab_stats_btn.setMinimumHeight(30)
         self.grab_stats_btn.clicked.connect(self.on_open_grab_stats)
         live_tools_layout.addWidget(self.grab_stats_btn)
 
         self.float_btn = QPushButton("悬浮窗")
         self.float_btn.setObjectName("ghostBtn")
-        self.float_btn.setFixedHeight(36)
+        self.float_btn.setMinimumHeight(30)
         self.float_btn.clicked.connect(self.on_toggle_floating)
         live_tools_layout.addWidget(self.float_btn)
 
@@ -823,7 +823,7 @@ class MainWindow(QMainWindow):
         header.addStretch()
         clear_log_btn = QPushButton("清空")
         clear_log_btn.setObjectName("ghostBtn")
-        clear_log_btn.setFixedHeight(32)
+        clear_log_btn.setMinimumHeight(30)
         clear_log_btn.setFixedWidth(80)
         clear_log_btn.clicked.connect(self.log_text.clear)
         header.addWidget(clear_log_btn)
@@ -837,7 +837,7 @@ class MainWindow(QMainWindow):
         if PERF_MONITOR_AVAILABLE:
             perf_btn = QPushButton("性能统计")
             perf_btn.setObjectName("ghostBtn")
-            perf_btn.setFixedHeight(34)
+            perf_btn.setMinimumHeight(30)
             perf_btn.clicked.connect(self.show_performance_stats)
             log_btn_layout.addWidget(perf_btn)
 

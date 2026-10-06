@@ -116,24 +116,10 @@ class SmsDialog(QDialog):
         self._timer.timeout.connect(self._tick)
 
     def _apply_styles(self):
-        self.setStyleSheet("""
-            QDialog { background-color: #F5F5F7; }
-            QLabel { color: #1D1D1F; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }
-            QLineEdit {
-                padding: 10px 14px; border: 1px solid #D2D2D7; border-radius: 10px;
-                background-color: #FFFFFF; font-size: 14px;
-            }
-            QLineEdit:focus { border: 2px solid #007AFF; padding: 9px 13px; }
-            QPushButton {
-                border: none; border-radius: 10px; background-color: #007AFF;
-                color: #FFFFFF; font-size: 14px; font-weight: 600; padding: 8px 16px;
-            }
-            QPushButton:hover { background-color: #0051D5; }
-            QPushButton:disabled { background-color: #D2D2D7; color: #8E8E93; }
-            QPushButton#cancelBtn { background-color: #E5E5EA; color: #007AFF; }
-            QPushButton#cancelBtn:hover { background-color: #D1D1D6; }
-            QCheckBox { color: #1D1D1F; font-size: 13px; spacing: 6px; }
-        """)
+        from ui.theme import get_stylesheet, THEME_DARK
+        from utils.config_manager import config_manager
+        theme = config_manager.get("theme", THEME_DARK)
+        self.setStyleSheet(get_stylesheet(theme))
 
     # ------------------------------------------------------------------
     # Logic

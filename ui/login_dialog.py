@@ -106,83 +106,37 @@ class LoginDialog(QDialog):
         
         # 添加弹性空间，确保元素向上聚集
         layout.addStretch(1)
+
+        # 回车直接提交 + 打开即聚焦手机号
+        self.phone_input.returnPressed.connect(self.on_main_btn_click)
+        self.code_input.returnPressed.connect(self.on_main_btn_click)
+        self.phone_input.setFocus()
     
     def apply_styles(self):
-        """应用iOS风格样式"""
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #F5F5F7;
-            }
-            
-            QLabel {
-                color: #1D1D1F;
-                font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
-            }
-            
-            QLineEdit {
-                padding: 12px 16px;
-                border: 1px solid #D2D2D7;
-                border-radius: 12px;
-                background-color: #FFFFFF;
-                color: #1D1D1F;
-                font-size: 14px;
-                font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
-            }
-            
-            QLineEdit:focus {
-                border: 2px solid #007AFF;
-                padding: 11px 15px;
-            }
-            
-            QPushButton {
-                padding: 12px 24px;
-                border: none;
-                border-radius: 12px;
-                background-color: #007AFF;
-                color: #FFFFFF;
-                font-size: 15px;
-                font-weight: 600;
-                font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
-            }
-            
-            QPushButton:hover {
-                background-color: #0051D5;
-            }
-            
-            QPushButton:pressed {
-                background-color: #004FC4;
-            }
-            
-            QPushButton:disabled {
-                background-color: #D2D2D7;
-                color: #8E8E93;
-            }
-            
-            /* 返回按钮样式 */
-            QPushButton#backBtn {
-                background-color: #E5E5EA;
-                color: #007AFF;
-            }
-            
-            QPushButton#backBtn:hover {
-                background-color: #D1D1D6;
-            }
-        """)
+        """应用当前主题样式（跟随主窗口深色/浅色）。"""
+        from ui.theme import get_stylesheet, THEME_DARK
+        from utils.config_manager import config_manager
+        theme = config_manager.get("theme", THEME_DARK)
+        # 对话框用主样式表 + 对话框背景覆盖
+        self.setStyleSheet(get_stylesheet(theme))
         self.back_btn.setObjectName("backBtn")
     
     def on_main_btn_click(self):
         """主按钮点击"""
         if self.step == 1:
             # 第一步：验证手机号并打开官网
+            import re
             phone = self.phone_input.text().strip()
-            
-            if not phone or len(phone) != 11:
+
+            if not re.fullmatch(r"1[3-9]\d{9}", phone or ""):
                 QMessageBox.warning(
-                    self, 
-                    "提示", 
+                    self,
+                    "提示",
                     "请输入正确的11位手机号",
                     QMessageBox.Ok
                 )
+                self.phone_input.setFocus()
+                self.phone_input.selectAll()
                 return
             
             self.phone_number = phone
