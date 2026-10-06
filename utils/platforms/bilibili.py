@@ -16,6 +16,8 @@ from utils.platforms.base import (
     LiveStreamStatus,
     PlatformAdapter,
     StreamError,
+    get_cached_stream_info,
+    put_cached_stream_info,
 )
 
 
@@ -43,13 +45,19 @@ class BilibiliAdapter(PlatformAdapter):
     name = "bilibili"
 
     def fetch(self, room_id: str) -> LiveStreamInfo:
+        cached = get_cached_stream_info(self.name, room_id)
+        if cached is not None:
+            logger.info("[LiveStream] Bilibili cache hit for room %s", room_id)
+            return cached
         try:
-            return self._fetch(room_id)
+            info = self._fetch(room_id)
         except Exception as e:
             logger.warning("[LiveStream] Bilibili fetch error: %s", e)
             return self._fail(
                 StreamError.NETWORK, "请求异常：%s" % e
             )
+        put_cached_stream_info(self.name, room_id, info)
+        return info
 
     def _fetch(self, room_id: str) -> LiveStreamInfo:
         # Step 1 – room_init (get real room ID + live status)
@@ -135,12 +143,12 @@ class BilibiliAdapter(PlatformAdapter):
 
 
 def parse_play_info(play_info: dict) -> str:
-    """Extract the first usable stream URL from ``getRoomPlayInfo``.
+    """Extract the best stream URL from ``getRoomPlayInfo``.
 
-    Walks all streams/formats/codecs/url_infos and returns the first
-    complete URL.  In the common case this is identical to the old
-    "first entry" behaviour, but it no longer fails when the first
-    entry is missing a host or token.
+    Walks all streams/formats/codecs/url_infos.  Prefers FLV URLs:
+    for 抢码, protocol latency dominates – FLV-over-HTTP is ~2-5s behind
+    live while HLS is typically 10-30s.  Falls back to the first complete
+    URL when no FLV entry exists.
     """
     try:
         streams = play_info["data"]["playurl_info"]["playurl"]["stream"]
@@ -148,6 +156,7 @@ def parse_play_info(play_info: dict) -> str:
         return ""
     if not isinstance(streams, list):
         return ""
+    first_complete = ""
     for stream in streams:
         if not isinstance(stream, dict):
             continue
@@ -165,6 +174,11 @@ def parse_play_info(play_info: dict) -> str:
                     extra = url_info.get("extra", "")
                     if host and base_url:
                         url = "%s%s%s" % (host, base_url, extra)
-                        if url.startswith("http"):
+                        if not url.startswith("http"):
+                            continue
+                        if not first_complete:
+                            first_complete = url
+                        # FLV = lowest-latency protocol; take it eagerly.
+                        if ".flv" in url:
                             return url
-    return ""
+    return first_complete

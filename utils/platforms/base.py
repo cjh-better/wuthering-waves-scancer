@@ -16,6 +16,9 @@ from typing import Dict, Optional
 import requests
 
 
+# -- stream URL cache ---------------------------------------------------
+# 同一房间短时间内重复查询直接命中缓存，省一次 API 往返。
+# 只缓存成功的 Normal 结果；TTL 5 分钟（流地址有时效，太长会失效）。
 class LiveStreamStatus(IntEnum):
     """Live stream status codes (mirrors MHY_Scanner LiveStreamStatus)."""
     Normal = 0
@@ -64,6 +67,44 @@ class LiveStreamInfo:
     headers: Dict[str, str] = field(default_factory=dict)
     detail: str = ""  # human-readable failure reason, shown to the user
     error: StreamError = StreamError.NONE  # machine-readable reason
+
+
+_STREAM_URL_CACHE: Dict[tuple, tuple] = {}  # (platform, room_id) -> (LiveStreamInfo, timestamp)
+_STREAM_URL_CACHE_TTL = 300.0
+_STREAM_URL_CACHE_MAX = 64
+
+
+def get_cached_stream_info(platform: str, room_id: str) -> Optional[LiveStreamInfo]:
+    """命中则返回缓存的 LiveStreamInfo，否则 None。"""
+    import time as _time
+    key = (platform, room_id)
+    entry = _STREAM_URL_CACHE.get(key)
+    if entry is None:
+        return None
+    info, ts = entry
+    if _time.time() - ts > _STREAM_URL_CACHE_TTL:
+        _STREAM_URL_CACHE.pop(key, None)
+        return None
+    return info
+
+
+def put_cached_stream_info(platform: str, room_id: str, info: LiveStreamInfo) -> None:
+    """只缓存 Normal 结果。"""
+    import time as _time
+    if info.status != LiveStreamStatus.Normal or not info.url:
+        return
+    if len(_STREAM_URL_CACHE) >= _STREAM_URL_CACHE_MAX:
+        # 淘汰最旧的一条
+        oldest = min(_STREAM_URL_CACHE.items(), key=lambda kv: kv[1][1])[0]
+        _STREAM_URL_CACHE.pop(oldest, None)
+    _STREAM_URL_CACHE[(platform, room_id)] = (info, _time.time())
+
+
+def clear_stream_url_cache() -> None:
+    """清空流地址缓存（清晰度切换/手动刷新时调用）。"""
+    _STREAM_URL_CACHE.clear()
+
+
 
 
 class PlatformAdapter(ABC):

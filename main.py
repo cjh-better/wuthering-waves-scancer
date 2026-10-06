@@ -80,15 +80,53 @@ def install_crash_handlers() -> None:
 
 def main():
     """主函数"""
-    install_crash_handlers()
+    # 优化75：单实例锁——防止多开抢 DXGI/摄像头资源
+    import tempfile as _tf
+    import os as _os
+    _lock_path = _os.path.join(_tf.gettempdir(), "wuthering_scancer.lock")
     try:
+        import fcntl as _fcntl
+        _lock_f = open(_lock_path, "w")
+        _fcntl.flock(_lock_f, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    except ImportError:
+        # Windows：用 msvcrt
+        try:
+            import msvcrt as _msvcrt
+            _lock_f = open(_lock_path, "w")
+            _msvcrt.locking(_lock_f.fileno(), _msvcrt.LK_NBLCK, 1)
+        except Exception:
+            _lock_f = None
+    except Exception:
+        # 已有实例在运行
+        print("已有实例在运行，退出。")
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            _app = QApplication([])
+            QMessageBox.warning(None, "提示", "鸣潮抢码器已在运行中，无需多开。")
+        except Exception:
+            pass
+        return
+    install_crash_handlers()
+    # 崩溃恢复：启动时清除 clean 标记（正常退出会重写）
+    try:
+        from utils.crash_recovery import clear_clean_exit
+        clear_clean_exit()
+    except Exception:
+        pass
+    try:
+        # 优化80：启动分阶段计时（定位慢启动）
+        import time as _t
+        _t0 = _t.time()
         from utils.log import get_logger
-        get_logger("Main").info(
+        _mlog = get_logger("Main")
+        _mlog.info("[Startup] 阶段1: 基础初始化 %.0fms", (_t.time() - _t0) * 1000)
+        _mlog.info(
             "崩溃日志路径：%s（闪退时请把此文件贴到 issue）", crash_log_path()
         )
         # 打包资源完整性自检（模型缺失 → 明确告警 + 降级，不闪退）
         from utils.resources import log_resource_status
         log_resource_status()
+        _mlog.info("[Startup] 阶段2: 资源自检 %.0fms", (_t.time() - _t0) * 1000)
     except Exception:
         pass
 
@@ -116,7 +154,19 @@ def main():
     window = MainWindow()
     window.show()
     
-    # 运行应用
+    # 运行应用；正常退出时写 clean 标记（崩溃时写不到，下次启动可识别）
+    try:
+        from utils.crash_recovery import mark_clean_exit
+        app.aboutToQuit.connect(mark_clean_exit)
+    except Exception:
+        pass
+    # 长时内存监控（后台线程，7×24 挂机泄漏预警）
+    try:
+        from utils.memory_monitor import memory_monitor
+        memory_monitor.start()
+        app.aboutToQuit.connect(memory_monitor.stop)
+    except Exception:
+        pass
     sys.exit(app.exec())
 
 

@@ -75,12 +75,67 @@ class DXGIScreenshot:
         Returns:
             PIL.Image: 截图对象
         """
+        # 优化11：指数退避重试，避免失败时忙循环打爆 CPU
+        import time as _t
+        for attempt in range(3):
+            try:
+                result = None
+                if self.method == "dxcam" and self.camera:
+                    result = self._grab_with_dxcam(x, y, width, height)
+                elif self.method == "mss" and self.mss_instance:
+                    result = self._grab_with_mss(x, y, width, height)
+                if result is not None:
+                    return result
+            except Exception as e:
+                logger.warning(f"[DXGI] grab attempt {attempt+1} failed: {e}")
+            _t.sleep(0.1 * (2 ** attempt))
+        return None
+
+    def grab_region_numpy(
+        self, x: int, y: int, width: int, height: int
+    ) -> "Optional[tuple[np.ndarray, str]]":
+        """零拷贝截图：直接返回 numpy 数组，跳过 PIL 中转。
+
+        安全性：dxcam 的 grab() 每次返回新分配的数组（官方文档行为），
+        不存在复用 buffer 的竞态。若某版本 dxcam 出现花屏/撕裂，
+        置 config `dxgi_copy_frame=true` 强制 copy 一份（多 ~2ms）。
+
+        Returns:
+            (array, color) 元组，color 为 "BGR" 或 "RGB"；
+            不支持时返回 None，调用方回退到 grab_region()。
+        """
         if self.method == "dxcam" and self.camera:
-            return self._grab_with_dxcam(x, y, width, height)
-        elif self.method == "mss" and self.mss_instance:
-            return self._grab_with_mss(x, y, width, height)
-        else:
-            return None
+            try:
+                region = (x, y, x + width, y + height)
+                frame = self.camera.grab(region=region)
+                if frame is None:
+                    return None
+                # dxcam 返回 BGR numpy
+                try:
+                    from utils.config_manager import config_manager as _cm
+                    if _cm.get("dxgi_copy_frame", False):
+                        frame = frame.copy()
+                except Exception:
+                    pass
+                return frame, "BGR"
+            except Exception:
+                return None
+        # 优化13：mss 路径也 numpy 直送（BGRA → BGR，免 PIL 中转）
+        if self.method == "mss" and self.mss_instance:
+            try:
+                import numpy as _np
+                monitor = {"top": y, "left": x, "width": width, "height": height}
+                sct = self.mss_instance.grab(monitor)
+                raw = _np.asarray(sct)  # BGRA
+                if raw.ndim == 3 and raw.shape[2] == 4:
+                    # BGRA → BGR：直接丢弃 alpha 通道
+                    arr = _np.ascontiguousarray(raw[:, :, :3])
+                else:
+                    arr = _np.ascontiguousarray(raw)
+                return arr, "BGR"
+            except Exception:
+                return None
+        return None
     
     def _grab_with_dxcam(self, x: int, y: int, width: int, height: int) -> Optional[Image.Image]:
         """使用dxcam截图（DXGI，最快）"""

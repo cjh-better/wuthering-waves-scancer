@@ -27,6 +27,25 @@ class KuroAPI:
     def __init__(self):
         # 创建终极优化的 Session
         self.session = requests.Session()
+        # 优化49：慢请求告警——包装 session.request，>3s 打 warning
+        _orig_request = self.session.request
+        def _timed_request(method, url, **kwargs):
+            import time as _t
+            start = _t.time()
+            try:
+                return _orig_request(method, url, **kwargs)
+            finally:
+                elapsed = _t.time() - start
+                if elapsed > 3.0:
+                    # 脱敏 URL 中的 token（优化48）
+                    safe_url = url
+                    try:
+                        import re as _re
+                        safe_url = _re.sub(r"(token|ticket|qrCode)=[^&]*", r"\1=***", url)
+                    except Exception:
+                        pass
+                    logger.warning("[HTTP] 慢请求 %.1fs %s %s", elapsed, method, safe_url)
+        self.session.request = _timed_request
         
         # 🚀 尝试使用 HTTP/2 适配器（连接复用，头部压缩，多路复用）
         if HTTP2_AVAILABLE:
@@ -91,20 +110,50 @@ class KuroAPI:
     def _pre_resolve_dns(self):
         """
         🚀 预解析DNS（启动时立即解析，避免首次请求延迟）
+        覆盖游戏 API + 抖音/哔哩哔哩直播域名（抢码链路全覆盖）。
         """
         try:
             import threading
             def resolve():
+                hosts = []
                 try:
-                    host = self.BASE_URL.replace("https://", "").replace("http://", "")
-                    socket.gethostbyname(host)
+                    hosts.append(self.BASE_URL.replace("https://", "").replace("http://", "").split("/")[0])
                 except Exception:
                     pass
+                # 直播域名（抖音/B站拉流、API）
+                hosts.extend([
+                    "live.douyin.com",
+                    "webcast.amemv.com",
+                    "pull-hs-f11.douyincdn.com",
+                    "pull-flv-f11.douyincdn.com",
+                    "api.live.bilibili.com",
+                    "live.bilibili.com",
+                    "cn-hbxy-ct-01-08.bilivideo.com",
+                ])
+                for host in hosts:
+                    try:
+                        socket.gethostbyname(host)
+                    except Exception:
+                        pass
             # 异步解析，不阻塞启动
             threading.Thread(target=resolve, daemon=True).start()
         except Exception:
             pass
     
+    @staticmethod
+    def _load_timeout_ladder(key: str, default: list) -> list:
+        """从配置加载超时阶梯，校验为正数列表（防配错导致无限等待）。"""
+        try:
+            from utils.config_manager import config_manager
+            raw = config_manager.get(key, default)
+            ladder = [float(x) for x in raw]
+            ladder = [x for x in ladder if x > 0]
+            if ladder:
+                return ladder[:5]  # 上限 5 阶，防误配超长
+        except Exception:
+            pass
+        return list(default)
+
     def measure_network_latency(self) -> float:
         """
         🚀 测量到API服务器的网络延迟（RTT）
@@ -139,8 +188,31 @@ class KuroAPI:
             url = f"{self.BASE_URL}/user/role/roleInfos"
             self.session.head(url, timeout=0.3, headers=self.headers)
             self._connection_warmed = True
+            import time as _t
+            self._last_warmup_ts = _t.time()
         except Exception:
             pass  # 预热失败不影响正常功能
+
+    def speculative_warmup(self, cooldown_s: float = 30.0) -> None:
+        """投机预热：帧差分变热时调用，提前建连。
+
+        有冷却（默认30s），避免每帧都打。后台线程执行，不阻塞解码。
+        """
+        import time as _t
+        import threading as _th
+        now = _t.time()
+        last = getattr(self, "_last_warmup_ts", 0.0)
+        if now - last < cooldown_s:
+            return
+        # 乐观标记，防止并发重复预热
+        self._last_warmup_ts = now
+        def _do():
+            try:
+                url = f"{self.BASE_URL}/user/role/roleInfos"
+                self.session.head(url, timeout=0.5, headers=self.headers)
+            except Exception:
+                pass
+        _th.Thread(target=_do, daemon=True).start()
     
     def login(self, mobile: str, code: str) -> Dict[str, Any]:
         """
@@ -171,7 +243,10 @@ class KuroAPI:
         except Exception as e:
             return {"code": -1, "msg": f"请求失败: {str(e)}"}
     
-    def get_role_infos(self, qr_code: str, smart_retry: bool = True) -> Dict[str, Any]:
+    def get_role_infos(
+        self, qr_code: str, smart_retry: bool = True,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """
         ⚡ 获取角色信息（验证二维码）- 智能重试版
         
@@ -185,25 +260,33 @@ class KuroAPI:
         url = f"{self.BASE_URL}/user/auth/roleInfos"
         data = {"qrCode": qr_code}
         
-        # 🚀 平衡的阶梯式重试：0.6s -> 1.2s -> 2.0s（稳定性优先）
-        timeouts = [0.6, 1.2, 2.0] if smart_retry else [1.0]
-        
+        # 阶梯式重试（超时才进下一阶）：默认值 0.6s -> 1.2s -> 2.0s，
+        # 可通过配置 roleinfo_retry_timeouts 调整
+        timeouts = self._load_timeout_ladder(
+            "roleinfo_retry_timeouts", [0.6, 1.2, 2.0]
+        ) if smart_retry else [1.0]
+        hdrs = headers if headers is not None else self.headers
+
         last_error = None
         for attempt, timeout in enumerate(timeouts, 1):
             try:
-                response = self.session.post(url, data=data, headers=self.headers, timeout=timeout)
+                response = self.session.post(url, data=data, headers=hdrs, timeout=timeout)
                 return response.json()
             except requests.exceptions.Timeout:
                 last_error = f"请求超时(>{timeout}s)"
                 if attempt < len(timeouts):
-                    continue  # Try next timeout
+                    continue
+                return {"code": -1, "msg": last_error}
             except Exception as e:
-                last_error = f"请求失败: {str(e)}"
-                break  # Don't retry on non-timeout errors
-        
+                return {"code": -1, "msg": f"请求异常: {e}"}
+        return {"code": -1, "msg": last_error or "未知错误"}
+
         return {"code": -1, "msg": last_error or "请求失败"}
     
-    def scan_login(self, qr_code: str, verify_code: str = "", auto_login: bool = False, smart_retry: bool = True) -> Dict[str, Any]:
+    def scan_login(
+        self, qr_code: str, verify_code: str = "", auto_login: bool = False,
+        smart_retry: bool = True, headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """
         ⚡ 扫码登录 - 智能重试版
         
@@ -217,20 +300,30 @@ class KuroAPI:
             登录结果字典
         """
         url = f"{self.BASE_URL}/user/auth/scanLogin"
+        # 优化40：幂等 key——同一 qrCode 的重复提交用同一 key，
+        # 服务端可去重，避免网络重试导致重复登录。
+        import uuid as _uuid
+        idem_key = str(_uuid.uuid5(_uuid.NAMESPACE_URL, qr_code))
         data = {
             "autoLogin": "true" if auto_login else "false",
             "qrCode": qr_code,
             "id": "",
             "verifyCode": verify_code
         }
+        req_headers = dict(headers or {})
+        req_headers["X-Idempotency-Key"] = idem_key
         
-        # 🚀 平衡的阶梯式重试：0.8s -> 1.5s -> 2.5s（稳定性优先）
-        timeouts = [0.8, 1.5, 2.5] if smart_retry else [1.5]
-        
+        # 阶梯式重试（超时才进下一阶）：默认值 0.8s -> 1.5s -> 2.5s，
+        # 可通过配置 login_retry_timeouts 调整（抢码场景可压首阶）
+        timeouts = self._load_timeout_ladder(
+            "login_retry_timeouts", [0.8, 1.5, 2.5]
+        ) if smart_retry else [1.5]
+        hdrs = req_headers  # 带幂等 key 的头（优化40）
+
         last_error = None
         for attempt, timeout in enumerate(timeouts, 1):
             try:
-                response = self.session.post(url, data=data, headers=self.headers, timeout=timeout)
+                response = self.session.post(url, data=data, headers=hdrs, timeout=timeout)
                 return response.json()
             except requests.exceptions.Timeout:
                 last_error = f"请求超时(>{timeout}s)"

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """扫描窗口 - AI增强版"""
-from PySide6.QtCore import Qt, QTimer, Signal, QRect
+import threading
+
+from PySide6.QtCore import Qt, QTimer, Signal, QRect, QThread
 from PySide6.QtWidgets import QWidget, QLabel, QApplication
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor
 
@@ -16,7 +18,62 @@ try:
     logger.info("[AI] Using AI-enhanced scanner")
 except Exception as e:
     logger.warning(f"[Warning] AI scanner failed to load, using standard scanner: {e}")
-    from utils.qr_scanner import qr_scanner
+    from utils.qr_scanner import qr_scanner  # type: ignore[assignment]
+
+
+class RegionScanWorker(QThread):
+    """屏幕区域扫描工作线程：截图 + 解码，不占用 UI 线程。
+
+    设计：
+    - UI 线程的 QTimer 每 tick 只读窗口几何（便宜），调用 request_scan()
+      把任务交给 worker；worker 繁忙时返回 False，本轮直接跳过（不堆积）。
+    - worker 做完通过 scan_done signal 把结果送回 UI 线程；
+      状态机（processing_qr / last_ticket / 计次）仍在 UI 线程维护，
+      无跨线程共享可变状态。
+    - 截图后端（DXGI/BitBlt/PIL）均为 Win32 API 调用，工作线程可安全使用；
+      WeChatQR 经 ai_qr_scanner._decode_lock 串行化，与直播流解码线程互斥。
+    """
+
+    scan_done = Signal(object)  # qr_code (str) or None
+
+    def __init__(self, scanner, parent=None):
+        super().__init__(parent)
+        self._scanner = scanner
+        self._task_lock = threading.Lock()
+        self._task = None  # (x, y, w, h) 或 None
+        self._wake = threading.Event()
+        self._running = True
+
+    def request_scan(self, x: int, y: int, w: int, h: int) -> bool:
+        """请求一次扫描。worker 繁忙时返回 False（调用方跳过本轮）。"""
+        with self._task_lock:
+            if self._task is not None:
+                return False
+            self._task = (x, y, w, h)
+        self._wake.set()
+        return True
+
+    def stop(self):
+        self._running = False
+        self._wake.set()
+
+    def run(self):
+        while self._running:
+            self._wake.wait()
+            self._wake.clear()
+            if not self._running:
+                break
+            with self._task_lock:
+                task = self._task
+                self._task = None
+            if task is None:
+                continue
+            x, y, w, h = task
+            try:
+                qr_code = self._scanner.scan_region(x, y, w, h)
+            except Exception:
+                qr_code = None
+            self.scan_done.emit(qr_code)
 
 
 class ScanWindow(QWidget):
@@ -50,6 +107,8 @@ class ScanWindow(QWidget):
         self.drag_position = None
         
         # Scan timer - adaptive cadence keeps detection quick without burning CPU.
+        # 注意：timer 回调只做任务分发（读几何 + request_scan），真正的
+        # 截图+解码在 RegionScanWorker 线程里，UI 线程不再被阻塞。
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self.scan_qr_code)
         self.fast_scan_interval = 80
@@ -58,6 +117,12 @@ class ScanWindow(QWidget):
         self.processing_scan_interval = 500
         self.scan_interval = self.fast_scan_interval
         self.consecutive_misses = 0
+
+        # 扫描工作线程：随窗口生死，closeEvent 里 stop + wait
+        self._closed = False
+        self.scan_worker = RegionScanWorker(qr_scanner, self)
+        self.scan_worker.scan_done.connect(self._on_region_scanned)
+        self.scan_worker.start()
         
         # Hint label - iOS style
         self.hint_label = QLabel("将此框对准二维码\n右键关闭", self)
@@ -170,19 +235,21 @@ class ScanWindow(QWidget):
     def scan_qr_code(self):
         """QTimer 扫描回调（顶层异常隔离）。
 
-        单次扫描的任何 Python 异常都只记日志、跳过本轮，绝不向上传播
+        只做任务分发：读窗口几何（便宜）并 request_scan()。真正的
+        截图+解码在 RegionScanWorker 线程里，UI 线程不阻塞。
+        单次分发的任何 Python 异常都只记日志、跳过本轮，绝不向上传播
         拖垮 Qt 事件循环。native 崩溃无法在此捕获，靠 main.py 的
         faulthandler 落盘诊断（见 issue #8）。
         """
         try:
-            self._scan_qr_code_inner()
+            self._dispatch_scan()
         except Exception as e:
-            logger.error(f"[Scan] 扫描回调异常(已隔离): {e}")
+            logger.error(f"[Scan] 扫描分发异常(已隔离): {e}")
             self.consecutive_misses += 1
             self._adapt_scan_interval_after_miss()
 
-    def _scan_qr_code_inner(self):
-        """🚀 扫描二维码 - 持续扫描模式"""
+    def _dispatch_scan(self):
+        """分发一次扫描任务给工作线程（UI 线程，只做便宜操作）。"""
         # If processing QR code, skip this scan
         if self.processing_qr:
             self._set_scan_interval(self.processing_scan_interval)
@@ -199,10 +266,23 @@ class ScanWindow(QWidget):
         if width <= 0 or height <= 0:
             logger.warning(f"[Scan] 扫描窗口尺寸非法({width}x{height})，跳过")
             return
-        
-        # 🚀 扫描区域（每次都尝试识别）
-        qr_code = qr_scanner.scan_region(x, y, width, height)
-        
+
+        # worker 繁忙则跳过本轮（不堆积，下一轮 tick 再试）
+        self.scan_worker.request_scan(x, y, width, height)
+
+    def _on_region_scanned(self, qr_code):
+        """工作线程完成一次扫描（UI 线程）：处理检出/未检出。"""
+        if self._closed:
+            return  # 关闭瞬间的在途结果：丢弃，避免对已关闭窗口做 UI 操作
+        try:
+            self._handle_scan_result(qr_code)
+        except Exception as e:
+            logger.error(f"[Scan] 扫描结果处理异常(已隔离): {e}")
+            self.consecutive_misses += 1
+            self._adapt_scan_interval_after_miss()
+
+    def _handle_scan_result(self, qr_code):
+        """🚀 处理单次扫描结果（原 _scan_qr_code_inner 的后半段）。"""
         if qr_code:
             self.consecutive_misses = 0
             self._set_scan_interval(self.processing_scan_interval)
@@ -271,5 +351,13 @@ class ScanWindow(QWidget):
     
     def closeEvent(self, event):
         """Close event"""
+        self._closed = True
         self.stop_scanning()
+        # 停掉工作线程并有界等待，避免 "Destroyed while thread is still running"
+        try:
+            self.scan_worker.stop()
+            if not self.scan_worker.wait(3000):
+                logger.warning("[Scan] 工作线程停止超时，已放行")
+        except Exception:
+            pass
         super().closeEvent(event)

@@ -3,12 +3,39 @@
 短信验证对话框（参考 KuRo_Scanner WindowSms）
 60 秒倒计时、重发按钮、"记住本次验证"复选框
 """
-from PySide6.QtCore import Qt, QTimer
+from typing import Optional
+
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QMessageBox,
 )
 from PySide6.QtGui import QFont
+
+
+class SmsSendWorker(QThread):
+    """后台发送短信验证码（send_sms 是同步网络请求，最长 5s）。
+
+    GeeTest 验证必须在 UI 线程弹模态框，因此 worker 只负责纯网络
+    发送；若服务端要求验证，UI 线程弹完 GeeTest 后再起一个 worker
+    带着 geeTestData 重发。
+    """
+
+    done = Signal(dict)  # send_sms 的原始返回
+
+    def __init__(self, gee_test_data: str = "", parent=None):
+        super().__init__(parent)
+        self.gee_test_data = gee_test_data
+
+    def run(self):
+        try:
+            from utils.kuro_api import kuro_api
+            result = kuro_api.send_sms(self.gee_test_data)
+            if not isinstance(result, dict):
+                result = {"code": -1, "msg": "发送失败"}
+        except Exception as e:
+            result = {"code": -1, "msg": f"发送失败: {e}"}
+        self.done.emit(result)
 
 
 class SmsDialog(QDialog):
@@ -23,10 +50,11 @@ class SmsDialog(QDialog):
         self._sms_code = ""
         self._auto_login = False
         self._remaining = 0
+        self._sms_worker: Optional[SmsSendWorker] = None
 
         self.setWindowTitle("短信验证")
         self.setFixedSize(420, 220)
-        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
 
         self._setup_ui()
         self._apply_styles()
@@ -112,19 +140,40 @@ class SmsDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _send_sms(self):
-        """发送短信验证码并启动倒计时。
+        """发送短信验证码并启动倒计时（网络部分在后台线程）。
 
         正常路径直接发送；若服务端要求 GeeTest 验证（见
-        ``KuroAPI.is_captcha_required``），弹出验证窗口，验证通过后
-        携带 geeTestData 重发（照搬 KuRo_Scanner C++ 逻辑）。
+        ``KuroAPI.is_captcha_required``），在 UI 线程弹出验证窗口，
+        验证通过后带着 geeTestData 起后台线程重发（照搬 KuRo_Scanner
+        C++ 逻辑）。
         """
+        self._start_send_worker()
+
+    def _start_send_worker(self, gee_test_data: str = ""):
+        """起一个后台线程发送验证码（防重复点击）。"""
+        if self._sms_worker and self._sms_worker.isRunning():
+            return
+        self.send_btn.setEnabled(False)
+        self.send_btn.setText("发送中...")
+        self._sms_worker = SmsSendWorker(gee_test_data, parent=self)
+        self._sms_worker.done.connect(self._on_sms_sent)
+        self._sms_worker.finished.connect(self._on_sms_worker_finished)
+        self._sms_worker.start()
+
+    def _on_sms_worker_finished(self):
+        self._sms_worker = None
+
+    def _on_sms_sent(self, result: dict):
+        """后台发送完成（UI 线程）：处理验证要求 / 成功 / 失败。"""
         from utils.kuro_api import kuro_api
-        result = kuro_api.send_sms()
         if kuro_api.is_captcha_required(result):
+            self.send_btn.setEnabled(True)
+            self.send_btn.setText("发送验证码")
             gee_data = self._run_geetest()
             if gee_data is None:
                 return  # 用户取消 / 组件不可用：不启动倒计时
-            result = kuro_api.send_sms(gee_data)
+            self._start_send_worker(gee_data)
+            return
         if result.get("code") == 200:
             self._start_countdown()
         else:
@@ -179,6 +228,14 @@ class SmsDialog(QDialog):
         self._sms_code = code
         self._auto_login = self.remember_checkbox.isChecked()
         self.accept()
+
+    def closeEvent(self, event):
+        if self._sms_worker and self._sms_worker.isRunning():
+            try:
+                self._sms_worker.wait(6000)
+            except Exception:
+                pass
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Public getters (call after exec())

@@ -227,21 +227,31 @@ class TestSmsDialog:
             dlg.close()
 
     def test_countdown_starts(self):
+        # 发送改为后台线程：等 worker 完成后再断言
         with patch("utils.kuro_api.KuroAPI.send_sms", return_value={"code": 200}):
             from ui.sms_dialog import SmsDialog
             dlg = SmsDialog("tok", "13800001234")
-            assert dlg.send_btn.isEnabled() is False
-            assert "重新发送" in dlg.send_btn.text()
-            dlg.close()
+            try:
+                if dlg._sms_worker:
+                    assert dlg._sms_worker.wait(5000)
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+                assert dlg.send_btn.isEnabled() is False
+                assert "重新发送" in dlg.send_btn.text()
+            finally:
+                dlg.close()
 
     def test_confirm_sets_code(self):
         with patch("utils.kuro_api.KuroAPI.send_sms", return_value={"code": 200}):
             from ui.sms_dialog import SmsDialog
             dlg = SmsDialog("tok", "13800001234")
-            dlg.code_input.setText("123456")
-            dlg._on_confirm()
-            assert dlg.get_sms_code() == "123456"
-            assert dlg.get_auto_login() is True  # default checked
+            try:
+                dlg.code_input.setText("123456")
+                dlg._on_confirm()
+                assert dlg.get_sms_code() == "123456"
+                assert dlg.get_auto_login() is True  # default checked
+            finally:
+                dlg.close()
 
 
 # =========================================================================
@@ -252,8 +262,7 @@ class TestRoomIdExtraction:
 
     def _make_window(self):
         """Create a MainWindow with heavy deps mocked out."""
-        with patch("ui.main_window.ScanWindow"), \
-             patch("ui.main_window.LoginDialog"):
+        with patch.dict("ui.main_window._DIALOG_REGISTRY", {"ScanWindow": MagicMock(), "LoginDialog": MagicMock()}):
             from ui.main_window import MainWindow
             win = MainWindow()
         return win
@@ -327,8 +336,7 @@ class TestMainWindowAccountIntegration:
         ConfigManager._instance = None
 
     def _make_window(self):
-        with patch("ui.main_window.ScanWindow"), \
-             patch("ui.main_window.LoginDialog"):
+        with patch.dict("ui.main_window._DIALOG_REGISTRY", {"ScanWindow": MagicMock(), "LoginDialog": MagicMock()}):
             from ui.main_window import MainWindow
             win = MainWindow()
         return win
@@ -406,20 +414,37 @@ class TestScanThreadAutoLogin:
 class TestScanWindowAdaptiveCadence:
 
     def test_scan_interval_slows_after_misses_and_resets(self):
-        from ui import scan_window as sw_mod
+        # 扫描改为异步分发：timer 回调只 dispatch，miss 计数在工作线程
+        # 回传结果的 _on_region_scanned 里累计。这里直接驱动结果 slot。
         from ui.scan_window import ScanWindow
 
         win = ScanWindow()
-        win.start_scanning()
-        with patch.object(sw_mod.qr_scanner, "scan_region", return_value=None):
+        try:
+            win.start_scanning()
             for _ in range(15):
-                win.scan_qr_code()
+                win._on_region_scanned(None)
             assert win.scan_interval == win.normal_scan_interval
 
             for _ in range(45):
-                win.scan_qr_code()
+                win._on_region_scanned(None)
             assert win.scan_interval == win.idle_scan_interval
 
-        win.reset_processing()
-        assert win.scan_interval == win.fast_scan_interval
-        win.close()
+            win.reset_processing()
+            assert win.scan_interval == win.fast_scan_interval
+        finally:
+            win.close()
+
+    def test_scan_dispatch_skips_when_worker_busy(self):
+        # worker 繁忙时 dispatch 不堆积：request_scan 返回 False 也不抛异常
+        from ui.scan_window import ScanWindow
+
+        win = ScanWindow()
+        try:
+            win.start_scanning()
+            # 占住 worker
+            assert win.scan_worker.request_scan(0, 0, 100, 100) is True
+            assert win.scan_worker.request_scan(0, 0, 100, 100) is False
+            # timer 回调在繁忙时直接跳过，不抛异常
+            win.scan_qr_code()
+        finally:
+            win.close()

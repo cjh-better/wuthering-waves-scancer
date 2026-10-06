@@ -45,7 +45,7 @@ class TestDecodeContract:
         scanner = AIQRScanner.__new__(AIQRScanner)  # skip heavy __init__
         called = {}
 
-        def fake_try_decode_array(arr, color="BGR"):
+        def fake_try_decode_array(arr, color="BGR", allow_slow_fallback=True):
             called["color"] = color
             called["shape"] = getattr(arr, "shape", None)
             return "TICKET"
@@ -60,6 +60,6 @@ class TestDecodeContract:
         from utils.ai_qr_scanner import AIQRScanner
 
         scanner = AIQRScanner.__new__(AIQRScanner)
-        scanner.try_decode_qr = lambda img: "TICKET2"
+        scanner.try_decode_qr = lambda img, allow_slow_fallback=True: "TICKET2"
         result = scanner.decode(Image.new("RGB", (10, 10), "white"))
         assert result == "TICKET2"

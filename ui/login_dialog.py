@@ -14,14 +14,17 @@ class LoginDialog(QDialog):
     
     login_success = Signal(dict)  # 登录成功信号
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, mobile: str = ""):
         super().__init__(parent)
         self.setWindowTitle("登录")
         self.setFixedSize(450, 420)
-        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
         self.step = 1  # 当前步骤：1=输入手机号，2=输入验证码
         self.phone_number = ""  # 保存的手机号
         self.setup_ui()
+        if mobile:
+            # 一键续期场景：直接填入已保存的手机号
+            self.phone_input.setText(mobile)
         self.apply_styles()
     
     def setup_ui(self):

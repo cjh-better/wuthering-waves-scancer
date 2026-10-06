@@ -55,16 +55,13 @@ class QRScanner:
         
         try:
             # 1. 提高对比度
-            enhancer = ImageEnhance.Contrast(img)
-            enhanced_images.append(enhancer.enhance(2.0))  # 2倍对比度
-            
+            enhanced_images.append(ImageEnhance.Contrast(img).enhance(2.0))  # 2倍对比度
+
             # 2. 提高亮度
-            enhancer = ImageEnhance.Brightness(img)
-            enhanced_images.append(enhancer.enhance(1.5))  # 1.5倍亮度
-            
+            enhanced_images.append(ImageEnhance.Brightness(img).enhance(1.5))  # 1.5倍亮度
+
             # 3. 锐化
-            enhancer = ImageEnhance.Sharpness(img)
-            enhanced_images.append(enhancer.enhance(2.0))  # 2倍锐化
+            enhanced_images.append(ImageEnhance.Sharpness(img).enhance(2.0))  # 2倍锐化
             
             # 4. 综合增强（对比度+锐化）
             temp = ImageEnhance.Contrast(img).enhance(1.8)

@@ -29,6 +29,20 @@ import pytest
 # Ensure the project root is on sys.path so `utils.*` imports resolve.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+
+@pytest.fixture(autouse=True)
+def _fast_give_up_reconnect(monkeypatch):
+    """默认关闭熔断慢轮询（1 次快速重试后放弃），让线程能自己退出。
+
+    熔断慢轮询会让线程在流断后存活很久（默认 30s×20次），旧测试
+    依赖“线程自己退出”，不 mock 会导致 wait() 超时、线程泄漏。
+    测熔断本身的用例（TestReconnectCircuitBreaker）会显式覆盖此 mock。
+    """
+    from utils.live_stream_scanner import LiveStreamScanner
+    monkeypatch.setattr(
+        LiveStreamScanner, "_reconnect_config", lambda self: (0.01, 1)
+    )
+
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtWidgets import QApplication
 from utils.live_stream_scanner import (
@@ -344,7 +358,7 @@ class TestFastFrameDecodeAndPayload:
             result = scanner._scan_frame(dummy)
 
         assert result == "G152#KURO_FAST"
-        fake_ai.decode.assert_called_once_with(dummy)
+        fake_ai.decode.assert_called_once_with(dummy, allow_slow_fallback=True)
 
     def test_same_ticket_with_different_url_is_emitted_once(self):
         dummy = _make_dummy_frame()
@@ -712,6 +726,13 @@ def _http_resp(status_code: int, text: str):
 class TestDouyinHtmlFallback:
     """Issues #6/#7: web/enter returns HTTP 200 with an empty body."""
 
+    def setup_method(self):
+        # 重置签名健康统计（类级状态，避免测试间污染）
+        from utils.platforms.douyin import DouyinAdapter
+        DouyinAdapter.reset_api_health()
+        from utils.platforms.base import clear_stream_url_cache
+        clear_stream_url_cache()
+
     def test_extract_flv_from_escaped_html(self):
         url = LiveStreamScanner._extract_flv_from_html(_HTML_WITH_FLV)
         assert url == _EXPECTED_FLV
@@ -854,3 +875,76 @@ class TestDouyinHtmlFallback:
 
         _process_events()
         assert any("疑似被风控" in e for e in errors)
+class TestFFmpegOpts:
+    def test_default_opts_have_timeout(self):
+        from utils.live_stream_scanner import LiveStreamScanner
+        opts = LiveStreamScanner._ffmpeg_opts()
+        assert "timeout;" in opts  # 连接 IO 超时，防止无限挂起
+        assert "probesize;" in opts
+
+    def test_custom_opts_override(self, monkeypatch):
+        from utils import config_manager as cm_mod
+        from utils.live_stream_scanner import LiveStreamScanner
+        mgr = cm_mod.config_manager
+        monkeypatch.setattr(mgr, "get", lambda k, d="": "probesize;4096" if k == "live_ffmpeg_opts" else d)
+        assert LiveStreamScanner._ffmpeg_opts() == "probesize;4096"
+
+    def test_blank_opts_fall_back_to_default(self, monkeypatch):
+        from utils import config_manager as cm_mod
+        from utils.live_stream_scanner import LiveStreamScanner, _FFMPEG_LOW_LATENCY_OPTS
+        mgr = cm_mod.config_manager
+        monkeypatch.setattr(mgr, "get", lambda k, d="": "   ")
+        assert LiveStreamScanner._ffmpeg_opts() == _FFMPEG_LOW_LATENCY_OPTS
+
+
+class TestReconnectCircuitBreaker:
+    """两阶段重连：突发失败后转入熔断慢轮询，而非直接放弃。"""
+
+    def _scanner(self):
+        from utils.live_stream_scanner import LiveStreamScanner
+        s = LiveStreamScanner()
+        s.is_running = True
+        return s
+
+    def test_burst_success_no_slow_phase(self):
+        s = self._scanner()
+        calls = []
+        s._try_reopen = lambda url: calls.append(url) or True
+        assert s._try_reconnect("http://x/live.flv") is True
+        assert len(calls) == 1  # fast path 一次成功，不进慢轮询
+
+    def test_slow_phase_recovers(self, monkeypatch):
+        s = self._scanner()
+        attempts = []
+        def fake_reopen(url):
+            attempts.append(url)
+            return len(attempts) >= 6  # 前5次失败，第6次成功
+        s._try_reopen = fake_reopen
+        s._refresh_stream_url = lambda: ""
+        # 突发阶段加速，慢轮询用极小间隔、最多3次
+        monkeypatch.setattr(s, "RECONNECT_FAST_DELAYS", [0.01, 0.01, 0.01])
+        monkeypatch.setattr(s, "_reconnect_config", lambda: (0.01, 3))
+        assert s._try_reconnect("http://x/live.flv") is True
+        assert len(attempts) == 6
+
+    def test_slow_phase_gives_up_after_max(self, monkeypatch):
+        s = self._scanner()
+        s._try_reopen = lambda url: False
+        s._refresh_stream_url = lambda: ""
+        monkeypatch.setattr(s, "RECONNECT_FAST_DELAYS", [0.01, 0.01, 0.01])
+        monkeypatch.setattr(s, "_reconnect_config", lambda: (0.01, 2))
+        assert s._try_reconnect("http://x/live.flv") is False
+
+    def test_interruptible_sleep_wakes_on_stop(self):
+        import threading
+        s = self._scanner()
+        def stopper():
+            import time as _t
+            _t.sleep(0.2)
+            s.is_running = False
+        threading.Thread(target=stopper, daemon=True).start()
+        assert s._interruptible_sleep(30) is True  # 被打断，不干等30s
+
+    def test_interruptible_sleep_full_wait(self):
+        s = self._scanner()
+        assert s._interruptible_sleep(0.05) is False

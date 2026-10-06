@@ -34,6 +34,8 @@ from utils.platforms.base import (
     LiveStreamStatus,
     PlatformAdapter,
     StreamError,
+    get_cached_stream_info,
+    put_cached_stream_info,
 )
 
 
@@ -51,9 +53,41 @@ _DOUYIN_API_URL = "https://live.douyin.com/webcast/room/web/enter/"
 _API_TIMEOUT = 10
 _HTML_TIMEOUT = 10
 
+# 清晰度覆盖（自动降级用）：为 None 时读 config；
+# live_stream_scanner 在检测到卡顿时会逐级下调（origin→uhd→hd→sd）。
+_quality_override: Optional[str] = None
+
+# 清晰度降级链：从高到低
+_QUALITY_LADDER = ["origin", "uhd", "hd", "sd"]
+
 # Bytes scanned after a "stream_url" key when extracting the stream URL
 # from the (escaped) embedded JSON of the room HTML page.
 _HTML_STREAM_LOOKAHEAD = 65536
+
+
+def set_quality_override(quality: Optional[str]) -> None:
+    """设置/清除清晰度覆盖（None=恢复 config）。"""
+    global _quality_override
+    _quality_override = quality
+
+
+def degrade_quality() -> Optional[str]:
+    """降一级清晰度，返回新的清晰度；已是最低时返回 None。"""
+    from utils.config_manager import config_manager as _cm
+    global _quality_override
+    current = _quality_override or str(_cm.get("live_stream_quality", "origin") or "origin")
+    try:
+        idx = _QUALITY_LADDER.index(current)
+    except ValueError:
+        idx = 0
+    if idx + 1 >= len(_QUALITY_LADDER):
+        return None
+    new_q = _QUALITY_LADDER[idx + 1]
+    _quality_override = new_q
+    # 清晰度变了，流地址缓存失效
+    from utils.platforms.base import clear_stream_url_cache
+    clear_stream_url_cache()
+    return new_q
 
 
 def _api_params(room_id: str) -> dict:
@@ -102,12 +136,68 @@ class DouyinAdapter(PlatformAdapter):
 
     name = "douyin"
 
+    # -- a_bogus 签名健康监控 ------------------------------------------
+    # 签名 API 返回空响应（疑似风控/签名失效）连续失败时，自动降级：
+    # 30 分钟内跳过签名通道直走 HTML，避免每次白白等 API 超时。
+    # 若 HTML 也拿不到，说明可能是房间未开播而非签名问题，不计入。
+    _api_consec_failures: int = 0
+    _api_disabled_until: float = 0.0
+    _API_FAIL_THRESHOLD = 3
+    _API_DISABLE_SECONDS = 1800.0
+
+    @classmethod
+    def api_health(cls) -> dict:
+        """签名通道健康状态（供诊断/UI）。"""
+        import time as _time
+        return {
+            "consec_failures": cls._api_consec_failures,
+            "disabled": _time.time() < cls._api_disabled_until,
+            "disabled_remaining_s": max(
+                0.0, cls._api_disabled_until - _time.time()
+            ),
+        }
+
+    @classmethod
+    def reset_api_health(cls) -> None:
+        """重置签名健康统计（测试用）。"""
+        cls._api_consec_failures = 0
+        cls._api_disabled_until = 0.0
+
+    @classmethod
+    def _record_api_success(cls) -> None:
+        cls._api_consec_failures = 0
+
+    @classmethod
+    def _record_api_failure(cls) -> None:
+        import time as _time
+        cls._api_consec_failures += 1
+        if cls._api_consec_failures >= cls._API_FAIL_THRESHOLD:
+            cls._api_disabled_until = _time.time() + cls._API_DISABLE_SECONDS
+            logger.warning(
+                "[LiveStream] a_bogus 签名通道连续 %d 次空响应，已自动降级："
+                "30 分钟内直走 HTML 通道。若长期如此，可能是抖音更新了风控算法，"
+                "签名需要更新。",
+                cls._api_consec_failures,
+            )
+
+    @classmethod
+    def _api_channel_usable(cls) -> bool:
+        import time as _time
+        return _time.time() >= cls._api_disabled_until
+
     def fetch(self, room_id: str) -> LiveStreamInfo:
+        # 流地址缓存：5 分钟内同一房间直接复用，省一次 API 往返
+        cached = get_cached_stream_info(self.name, room_id)
+        if cached is not None:
+            logger.info("[LiveStream] Douyin cache hit for room %s", room_id)
+            return cached
         try:
-            return self._fetch(room_id)
+            info = self._fetch(room_id)
         except Exception as e:
             logger.warning("[LiveStream] Douyin fetch error: %s", e)
             return self._fail(StreamError.NETWORK, "请求异常：%s" % e)
+        put_cached_stream_info(self.name, room_id, info)
+        return info
 
     def _fetch(self, room_id: str) -> LiveStreamInfo:
         headers = {
@@ -151,9 +241,25 @@ class DouyinAdapter(PlatformAdapter):
             html_detail = "页面加载失败"
 
         # Channel 2 – signed web/enter JSON API.
-        api_info = self._fetch_via_api(room_id, headers)
+        # 签名健康检查：连续失败后自动降级，直走 HTML（此时 html 已取过，
+        # 若 html 有流地址前面已返回，这里说明两通道都拿不到）
+        if not self._api_channel_usable():
+            logger.info(
+                "[LiveStream] 签名通道降级中（剩余 %.0f 秒），跳过 API",
+                self.api_health()["disabled_remaining_s"],
+            )
+            api_info = self._fail(
+                StreamError.EMPTY_RESPONSE, "签名通道降级中，已跳过"
+            )
+        else:
+            api_info = self._fetch_via_api(room_id, headers)
         if api_info.status == LiveStreamStatus.Normal:
+            self._record_api_success()
             return api_info
+        # 只有空响应（签名疑似失效）才计入健康统计；
+        # 房间不存在/未开播等是正常业务状态，不怪签名。
+        if api_info.error == StreamError.EMPTY_RESPONSE:
+            self._record_api_failure()
 
         # Neither channel worked – combine both reasons for the user.
         combined = "HTML备用通道：%s" % html_detail
@@ -219,8 +325,17 @@ class DouyinAdapter(PlatformAdapter):
                 StreamError.UNKNOWN, "未知的房间状态(status=%s)" % status
             )
 
-        # Extract FLV URL (try pull_datas first, then live_core_sdk_data)
-        flv_url = parse_stream_url(room_data)
+        # Extract FLV URL (try pull_datas first, then live_core_sdk_data).
+        # Quality preference is configurable (default origin = 最高画质，
+        # 保检出率）；低清晰度延迟略低，tradeoff 由 review 决策。
+        try:
+            from utils.config_manager import config_manager
+            quality = _quality_override or str(
+                config_manager.get("live_stream_quality", "origin") or "origin"
+            )
+        except Exception:
+            quality = _quality_override or "origin"
+        flv_url = parse_stream_url(room_data, quality)
         if not flv_url:
             http_utils.diag_response("douyin/web_enter", r)
             return self._fail(
@@ -230,7 +345,7 @@ class DouyinAdapter(PlatformAdapter):
         return LiveStreamInfo(status=LiveStreamStatus.Normal, url=flv_url)
 
 
-def parse_stream_url(room_data: dict) -> str:
+def parse_stream_url(room_data: dict, quality: str = "origin") -> str:
     """Extract FLV URL from Douyin room data.
 
     Tries every ``pull_datas`` entry first (first valid URL wins),
@@ -238,6 +353,11 @@ def parse_stream_url(room_data: dict) -> str:
     is ported from MHY_Scanner's
     ``LiveDouyin::GetStreamLinkFromResponse`` and fixes a missing
     fallback in the original KuRo_Scanner.
+
+    Args:
+        quality: preferred quality (``origin``/``uhd``/``hd``/``sd``).
+            Lower qualities have slightly lower latency but blurrier
+            frames – default ``origin`` protects detection rate.
     """
     stream_url = room_data.get("stream_url", {})
     if not isinstance(stream_url, dict):
@@ -247,7 +367,7 @@ def parse_stream_url(room_data: dict) -> str:
     pull_datas = stream_url.get("pull_datas")
     if isinstance(pull_datas, dict):
         for entry in pull_datas.values():
-            url = _extract_flv(entry)
+            url = _extract_flv(entry, quality)
             if url:
                 return url
 
@@ -255,15 +375,25 @@ def parse_stream_url(room_data: dict) -> str:
     core_sdk = stream_url.get("live_core_sdk_data", {})
     if isinstance(core_sdk, dict):
         pull_data = core_sdk.get("pull_data", {})
-        url = _extract_flv(pull_data)
+        url = _extract_flv(pull_data, quality)
         if url:
             return url
 
     return ""
 
 
-def _extract_flv(entry) -> str:
-    """Pull the ``origin/main/flv`` URL out of one stream-data entry."""
+# Quality fallback order: preferred -> origin -> any available.
+# (Keys observed in stream_data payloads.)
+_QUALITY_FALLBACK = ("origin", "uhd", "hd", "sd")
+
+
+def _extract_flv(entry, quality: str = "origin") -> str:
+    """Pull the FLV URL out of one stream-data entry.
+
+    Tries *quality* first, then ``origin``, then any quality that has
+    a usable ``main/flv`` URL – never worse than the old origin-only
+    behaviour.
+    """
     if not isinstance(entry, dict):
         return ""
     stream_data_str = entry.get("stream_data", "")
@@ -272,10 +402,31 @@ def _extract_flv(entry) -> str:
     sd = http_utils.safe_json(stream_data_str)
     if not sd:
         return ""
-    try:
-        return sd["data"]["origin"]["main"]["flv"] or ""
-    except (KeyError, TypeError):
+    data = sd.get("data")
+    if not isinstance(data, dict):
         return ""
+    ordered = []
+    if quality:
+        ordered.append(quality)
+    for q in _QUALITY_FALLBACK:
+        if q not in ordered:
+            ordered.append(q)
+    for q in ordered:
+        try:
+            url = data[q]["main"]["flv"] or ""
+        except (KeyError, TypeError):
+            continue
+        if url:
+            return url
+    # Last resort: any quality with a main/flv URL.
+    for q, qdata in data.items():
+        try:
+            url = qdata["main"]["flv"] or ""
+        except (KeyError, TypeError, AttributeError):
+            continue
+        if url:
+            return url
+    return ""
 
 
 def extract_flv_from_html(html: str) -> str:

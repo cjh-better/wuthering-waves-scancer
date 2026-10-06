@@ -172,6 +172,12 @@ class TestBilibiliAdapter:
 
 
 class TestDouyinAdapter:
+    def setup_method(self):
+        from utils.platforms.douyin import DouyinAdapter
+        DouyinAdapter.reset_api_health()
+        from utils.platforms.base import clear_stream_url_cache
+        clear_stream_url_cache()
+
     def test_room_page_with_stream_skips_api(self):
         """HTML-first: stream found on the room page, API never called."""
         session = MagicMock()
