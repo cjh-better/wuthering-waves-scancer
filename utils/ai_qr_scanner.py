@@ -10,6 +10,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils.qr_payload import is_kuro_qr, normalise_qr_text
+from utils.log import get_logger
+
+
+logger = get_logger("AI")
 
 # 尝试导入OpenCV
 try:
@@ -17,7 +21,7 @@ try:
     OPENCV_AVAILABLE = True
 except ImportError:
     OPENCV_AVAILABLE = False
-    print("[Error] OpenCV not installed, AI model features unavailable")
+    logger.error("[Error] OpenCV not installed, AI model features unavailable")
 
 # 尝试导入DXGI截图工具（GPU加速，与MHY_Scanner相同，最快）
 try:
@@ -25,7 +29,7 @@ try:
     DXGI_SCREENSHOT_AVAILABLE = True
 except Exception as e:
     DXGI_SCREENSHOT_AVAILABLE = False
-    print(f"[Info] DXGI screenshot not available: {e}")
+    logger.info(f"[Info] DXGI screenshot not available: {e}")
 
 # 尝试导入快速截图工具（Windows BitBlt，比PIL快5-10倍）
 try:
@@ -33,7 +37,7 @@ try:
     FAST_SCREENSHOT_AVAILABLE = True
 except Exception as e:
     FAST_SCREENSHOT_AVAILABLE = False
-    print(f"[Info] Fast screenshot not available (will use PIL): {e}")
+    logger.info(f"[Info] Fast screenshot not available (will use PIL): {e}")
 
 # 🚀 导入性能监控工具
 try:
@@ -41,7 +45,7 @@ try:
     PERF_MONITOR_AVAILABLE = True
 except Exception as e:
     PERF_MONITOR_AVAILABLE = False
-    print(f"[Info] Performance monitor not available: {e}")
+    logger.info(f"[Info] Performance monitor not available: {e}")
 
 # 🚀 导入内存池
 try:
@@ -49,7 +53,7 @@ try:
     BUFFER_POOL_AVAILABLE = True
 except Exception as e:
     BUFFER_POOL_AVAILABLE = False
-    print(f"[Info] Buffer pool not available: {e}")
+    logger.info(f"[Info] Buffer pool not available: {e}")
 
 # 🚀 导入智能ROI检测器
 try:
@@ -57,7 +61,7 @@ try:
     ROI_DETECTOR_AVAILABLE = True
 except Exception as e:
     ROI_DETECTOR_AVAILABLE = False
-    print(f"[Info] ROI detector not available: {e}")
+    logger.info(f"[Info] ROI detector not available: {e}")
 
 
 class AIQRScanner:
@@ -84,7 +88,7 @@ class AIQRScanner:
             try:
                 self.dxgi_screenshot = get_dxgi_screenshot()
             except Exception as e:
-                print(f"[Warning] Failed to init DXGI screenshot: {e}")
+                logger.warning(f"[Warning] Failed to init DXGI screenshot: {e}")
         
         # 🚀 快速截图工具（Windows BitBlt，比PIL快5-10倍）
         self.fast_screenshot = None
@@ -92,7 +96,7 @@ class AIQRScanner:
             try:
                 self.fast_screenshot = get_fast_screenshot()
             except Exception as e:
-                print(f"[Warning] Failed to init fast screenshot: {e}")
+                logger.warning(f"[Warning] Failed to init fast screenshot: {e}")
         
         # 🚀 多线程池（自动检测CPU核心数，用于并行图像处理）
         self.use_thread_pool = False  # 默认关闭（串行已够快）
@@ -101,9 +105,9 @@ class AIQRScanner:
             from utils.thread_pool_scanner import get_thread_pool_scanner
             self.thread_pool = get_thread_pool_scanner()  # 自动检测CPU核心数
             # self.use_thread_pool = True  # 可选：启用多线程（提升复杂场景性能）
-            print("[ThreadPool] Available (disabled by default, single-thread is faster for most cases)")
+            logger.info("[ThreadPool] Available (disabled by default, single-thread is faster for most cases)")
         except Exception as e:
-            print(f"[ThreadPool] Not available: {e}")
+            logger.info(f"[ThreadPool] Not available: {e}")
         
         # 🚀 并行识别线程池（用于多候选QR并行识别）
         self.parallel_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="QRDecode")
@@ -181,7 +185,7 @@ class AIQRScanner:
         
         # 打印所有消息
         for msg in self.load_messages:
-            print(msg)
+            logger.info(msg)
     
     def _init_wechat_detector(self):
         """初始化微信QR码识别器（与MHY_Scanner相同）"""
@@ -209,15 +213,15 @@ class AIQRScanner:
                 )
                 if hasattr(self.wechat_detector, "setScaleFactor"):
                     self.wechat_detector.setScaleFactor(0.4)
-                print("[WeChatQR] Detector initialized (same as MHY_Scanner)")
+                logger.info("[WeChatQR] Detector initialized (same as MHY_Scanner)")
                 if hasattr(self, 'load_messages'):
                     self.load_messages.append("[WeChatQR] WeChat QR detector enabled (MHY-style)")
             else:
-                print("[WeChatQR] Model files incomplete, using pyzbar")
+                logger.info("[WeChatQR] Model files incomplete, using pyzbar")
         except AttributeError:
-            print("[WeChatQR] wechat_qrcode not available (need opencv-contrib-python)")
+            logger.info("[WeChatQR] wechat_qrcode not available (need opencv-contrib-python)")
         except Exception as e:
-            print(f"[WeChatQR] Init failed: {e}")
+            logger.warning(f"[WeChatQR] Init failed: {e}")
     
     def _warm_up(self):
         """
@@ -227,13 +231,13 @@ class AIQRScanner:
             return
         
         try:
-            print("[Warmup] Pre-warming all components...")
+            logger.info("[Warmup] Pre-warming all components...")
             
             # 1. 预热DXGI截图
             if self.dxgi_screenshot:
                 try:
                     self.dxgi_screenshot.grab_region(0, 0, 100, 100)
-                    print("[Warmup] DXGI screenshot OK")
+                    logger.info("[Warmup] DXGI screenshot OK")
                 except Exception:
                     pass
             
@@ -242,7 +246,7 @@ class AIQRScanner:
                 try:
                     dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
                     self.wechat_detector.detectAndDecode(dummy_img)
-                    print("[Warmup] WeChat detector OK")
+                    logger.info("[Warmup] WeChat detector OK")
                 except Exception:
                     pass
             
@@ -251,15 +255,15 @@ class AIQRScanner:
                 try:
                     buf = image_buffer_pool.get_buffer(720, 1280, 3)
                     image_buffer_pool.return_buffer(buf)
-                    print("[Warmup] Buffer pool OK")
+                    logger.info("[Warmup] Buffer pool OK")
                 except Exception:
                     pass
             
             self.warmed_up = True
-            print("[Warmup] All components warmed up!")
+            logger.info("[Warmup] All components warmed up!")
             
         except Exception as e:
-            print(f"[Warmup] Failed: {e}")
+            logger.warning(f"[Warmup] Failed: {e}")
     
     def fast_rgb_to_gray_simd(self, img_array: np.ndarray) -> np.ndarray:
         """
@@ -302,7 +306,7 @@ class AIQRScanner:
             
             return output
         except Exception as e:
-            print(f"[Warning] Super-resolution processing failed: {e}")
+            logger.warning(f"[Warning] Super-resolution processing failed: {e}")
             return img
     
     def enhance_image_ai(self, img: Image.Image) -> List[Image.Image]:
@@ -338,7 +342,7 @@ class AIQRScanner:
                 enhanced_images.append(Image.fromarray(sr_gray))
             
         except Exception as e:
-            print(f"[Warning] AI image enhancement failed: {e}")
+            logger.warning(f"[Warning] AI image enhancement failed: {e}")
             # 降级到基础增强
             return self._enhance_image_basic(img)
         
@@ -365,7 +369,7 @@ class AIQRScanner:
             enhanced_images.append(temp)
             
         except Exception as e:
-            print(f"[Warning] Basic image enhancement failed: {e}")
+            logger.warning(f"[Warning] Basic image enhancement failed: {e}")
         
         return enhanced_images
     
@@ -585,7 +589,7 @@ class AIQRScanner:
             
             # 🚀 调试：打印扫描信息
             if self.debug_mode:
-                print(f"[Scan] Trying {len(candidates)} candidates, size: {img.width}x{img.height}")
+                logger.info(f"[Scan] Trying {len(candidates)} candidates, size: {img.width}x{img.height}")
             
             parallel_result = self.try_decode_parallel(candidates)
             
@@ -601,12 +605,12 @@ class AIQRScanner:
                 if ROI_DETECTOR_AVAILABLE:
                     smart_roi_detector.add_detection(x, y, width, height)
                 
-                print(f"[QR] ✓ Decoded using {method} ({decoder})")
+                logger.info(f"[QR] ✓ Decoded using {method} ({decoder})")
                 return qr_code
             
             # 🚀 调试：如果并行识别失败，打印信息
             if self.debug_mode:
-                print(f"[Scan] Parallel failed, trying enhanced...")
+                logger.warning(f"[Scan] Parallel failed, trying enhanced...")
             
             # 🚀 如果并行识别失败，尝试AI增强版本（提升识别率）
             enhanced_images = self.enhance_image_ai(img_1280)
@@ -626,12 +630,12 @@ class AIQRScanner:
                     if ROI_DETECTOR_AVAILABLE:
                         smart_roi_detector.add_detection(x, y, width, height)
                     
-                    print(f"[QR] ✓ Decoded using {method_name} (enhanced, {decoder})")
+                    logger.info(f"[QR] ✓ Decoded using {method_name} (enhanced, {decoder})")
                     return result
             
             # 🚀 调试：所有方法都失败
             if self.debug_mode:
-                print(f"[Scan] ✗ All methods failed for {img.width}x{img.height} image")
+                logger.warning(f"[Scan] ✗ All methods failed for {img.width}x{img.height} image")
             
             # 🚀 性能监控：未找到QR
             if PERF_MONITOR_AVAILABLE:
@@ -640,7 +644,7 @@ class AIQRScanner:
             return None
             
         except Exception as e:
-            print(f"[Error] AI QR scan failed: {e}")
+            logger.error(f"[Error] AI QR scan failed: {e}")
             return None
     
     def scan_clipboard(self) -> Optional[str]:
@@ -671,7 +675,7 @@ class AIQRScanner:
             return None
             
         except Exception as e:
-            print(f"[Error] Clipboard QR scan failed: {e}")
+            logger.error(f"[Error] Clipboard QR scan failed: {e}")
             return None
 
 

@@ -5,6 +5,10 @@
 from PySide6.QtCore import QThreadPool, QRunnable, Signal, QObject
 from typing import Optional, Callable
 import threading
+from utils.log import get_logger
+
+
+logger = get_logger("ThreadPool")
 
 
 class WorkerSignals(QObject):
@@ -76,7 +80,7 @@ class ThreadPoolScanner:
         self.processing_lock = threading.Lock()
         self.is_processing = False
         
-        print(f"[ThreadPool] Initialized with {max_workers} workers (MHY-style)")
+        logger.info(f"[ThreadPool] Initialized with {max_workers} workers (MHY-style)")
     
     def submit_decode_task(self, img_data, decode_func, on_success: Optional[Callable] = None):
         """
@@ -117,7 +121,7 @@ class ThreadPoolScanner:
                 return False
                 
         except Exception as e:
-            print(f"[ThreadPool] Failed to submit task: {e}")
+            logger.warning(f"[ThreadPool] Failed to submit task: {e}")
             self.processing_lock.release()
             return False
     
@@ -142,11 +146,14 @@ class ThreadPoolScanner:
 
 # 全局线程池实例
 _global_thread_pool = None
+_thread_pool_lock = threading.Lock()
 
 def get_thread_pool_scanner(max_workers: int = None) -> ThreadPoolScanner:
-    """获取全局线程池扫描器单例"""
+    """获取全局线程池扫描器单例（线程安全）"""
     global _global_thread_pool
     if _global_thread_pool is None:
-        _global_thread_pool = ThreadPoolScanner(max_workers)
+        with _thread_pool_lock:
+            if _global_thread_pool is None:
+                _global_thread_pool = ThreadPoolScanner(max_workers)
     return _global_thread_pool
 

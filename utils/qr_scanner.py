@@ -7,6 +7,10 @@ import ctypes
 import numpy as np
 
 from utils.qr_payload import is_kuro_qr, normalise_qr_text
+from utils.log import get_logger
+
+
+logger = get_logger("QR")
 
 # 尝试导入OpenCV，如果没有就使用基础版本
 try:
@@ -14,7 +18,7 @@ try:
     OPENCV_AVAILABLE = True
 except ImportError:
     OPENCV_AVAILABLE = False
-    print("[警告] OpenCV未安装，将使用基础图像处理（建议: pip install opencv-python）")
+    logger.warning("[警告] OpenCV未安装，将使用基础图像处理（建议: pip install opencv-python）")
 
 
 class QRScanner:
@@ -53,7 +57,7 @@ class QRScanner:
             enhanced_images.append(temp)
             
         except Exception as e:
-            print(f"[警告] 基础图像增强失败: {e}")
+            logger.warning(f"[警告] 基础图像增强失败: {e}")
         
         return enhanced_images
     
@@ -111,7 +115,7 @@ class QRScanner:
             enhanced_images.append(Image.fromarray(sharpened))
             
         except Exception as e:
-            print(f"[警告] OpenCV图像增强失败: {e}")
+            logger.warning(f"[警告] OpenCV图像增强失败: {e}")
             # 降级到基础增强
             return self.enhance_image_basic(img)
         
@@ -181,7 +185,7 @@ class QRScanner:
             return None
             
         except Exception as e:
-            print(f"扫描二维码失败: {e}")
+            logger.warning(f"扫描二维码失败: {e}")
             return None
     
     def scan_clipboard(self) -> Optional[str]:
@@ -215,7 +219,7 @@ class QRScanner:
             return None
             
         except Exception as e:
-            print(f"从剪贴板扫描二维码失败: {e}")
+            logger.warning(f"从剪贴板扫描二维码失败: {e}")
             return None
 
 

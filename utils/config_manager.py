@@ -4,19 +4,27 @@
 """
 import json
 import os
+import threading
 from typing import Dict, Any
+from utils.log import get_logger
+
+
+logger = get_logger("Config")
 
 
 class ConfigManager:
-    """配置管理器（单例模式）"""
-    
+    """配置管理器（单例模式，线程安全）"""
+
     _instance = None
+    _lock = threading.Lock()
     CONFIG_FILE = "config/settings.json"
-    
+
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
     
     def __init__(self):
@@ -42,6 +50,8 @@ class ConfigManager:
             "scan_window_size": [800, 800],  # 扫描窗口大小
             "thread_pool_enabled": False,    # 是否启用多线程池
             "live_scan_frame_stride": 3,     # 直播流每几帧扫描一次
+            "live_decode_queue_size": 2,     # 直播解码帧队列长度（采集/解码分离，丢旧帧保实时）
+            "live_decode_budget_ms": 150,    # 单帧解码耗时预算（毫秒），超过则自适应降频
             "version": "3.0"
         }
     
@@ -51,9 +61,9 @@ class ConfigManager:
         if not os.path.exists(self.config_dir):
             try:
                 os.makedirs(self.config_dir)
-                print(f"[Config] Created config directory: {self.config_dir}")
+                logger.info(f"[Config] Created config directory: {self.config_dir}")
             except Exception as e:
-                print(f"[Config] Failed to create config directory: {e}")
+                logger.warning(f"[Config] Failed to create config directory: {e}")
                 return self._get_default_config()
         
         # 尝试加载配置文件
@@ -61,7 +71,7 @@ class ConfigManager:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    print("[Config] Loaded configuration successfully")
+                    logger.info("[Config] Loaded configuration successfully")
                     
                     # 合并默认配置（处理新增配置项）
                     default_config = self._get_default_config()
@@ -71,13 +81,13 @@ class ConfigManager:
                     
                     return config
             except Exception as e:
-                print(f"[Config] Failed to load config file: {e}")
+                logger.warning(f"[Config] Failed to load config file: {e}")
                 return self._get_default_config()
         else:
             # 创建默认配置文件
             config = self._get_default_config()
             self._save_config(config)
-            print("[Config] Created default configuration file")
+            logger.info("[Config] Created default configuration file")
             return config
     
     def _save_config(self, config: Dict[str, Any] = None):
@@ -90,7 +100,7 @@ class ConfigManager:
                 json.dump(config, f, indent=4, ensure_ascii=False)
             # print("[Config] Configuration saved successfully")
         except Exception as e:
-            print(f"[Config] Failed to save config: {e}")
+            logger.warning(f"[Config] Failed to save config: {e}")
     
     def get(self, key: str, default=None) -> Any:
         """获取配置项"""
@@ -116,7 +126,7 @@ class ConfigManager:
         """重置为默认配置"""
         self.config = self._get_default_config()
         self._save_config()
-        print("[Config] Configuration reset to defaults")
+        logger.info("[Config] Configuration reset to defaults")
 
 
 # 全局配置管理器实例
