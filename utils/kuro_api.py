@@ -189,23 +189,6 @@ class KuroAPI:
         self._ladder_cache[key] = result
         return result
 
-    def measure_network_latency(self) -> float:
-        """
-        🚀 测量到API服务器的网络延迟（RTT）
-        
-        Returns:
-            延迟时间（毫秒），失败返回 -1
-        """
-        try:
-            import time
-            start = time.perf_counter()
-            # 使用 HEAD 请求测量延迟（最小开销）
-            response = self.session.head(self.BASE_URL, timeout=2)
-            latency = (time.perf_counter() - start) * 1000
-            return latency
-        except Exception:
-            return -1
-    
     def set_token(self, token: str) -> None:
         """设置认证 token"""
         self.token = token
