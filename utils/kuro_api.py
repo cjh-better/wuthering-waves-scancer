@@ -204,14 +204,21 @@ class KuroAPI:
         last = getattr(self, "_last_warmup_ts", 0.0)
         if now - last < cooldown_s:
             return
-        # 乐观标记，防止并发重复预热
-        self._last_warmup_ts = now
+        # L3修复：成功后才更新时间戳；失败时允许下次重试（而非冷却30s）
+        # 仍需防并发重复：用独立的 _warming 标记
+        if getattr(self, "_warming", False):
+            return
+        self._warming = True
         def _do():
             try:
                 url = f"{self.BASE_URL}/user/role/roleInfos"
                 self.session.head(url, timeout=0.5, headers=self.headers)
+                # 成功才更新冷却时间戳
+                self._last_warmup_ts = _t.time()
             except Exception:
                 pass
+            finally:
+                self._warming = False
         _th.Thread(target=_do, daemon=True).start()
     
     def login(self, mobile: str, code: str) -> Dict[str, Any]:
@@ -272,16 +279,16 @@ class KuroAPI:
             try:
                 response = self.session.post(url, data=data, headers=hdrs, timeout=timeout)
                 return response.json()
-            except requests.exceptions.Timeout:
-                last_error = f"请求超时(>{timeout}s)"
+            # M3修复：ConnectionError（DNS失败/连接被拒/重置）与 Timeout
+            # 同属瞬时网络故障，同等进阶梯重试；抢码窗口内一次瞬断不应直接失败
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_error = f"请求超时(>{timeout}s)" if isinstance(e, requests.exceptions.Timeout) else f"连接失败: {e}"
                 if attempt < len(timeouts):
                     continue
                 return {"code": -1, "msg": last_error}
             except Exception as e:
                 return {"code": -1, "msg": f"请求异常: {e}"}
         return {"code": -1, "msg": last_error or "未知错误"}
-
-        return {"code": -1, "msg": last_error or "请求失败"}
     
     def scan_login(
         self, qr_code: str, verify_code: str = "", auto_login: bool = False,
@@ -302,8 +309,12 @@ class KuroAPI:
         url = f"{self.BASE_URL}/user/auth/scanLogin"
         # 优化40：幂等 key——同一 qrCode 的重复提交用同一 key，
         # 服务端可去重，避免网络重试导致重复登录。
+        # H1修复：verify_code 纳入 key——短信验证重试时验证码变化，
+        # 若 key 不变且服务端处理该头，会返回缓存的"需要验证码"
+        # 响应导致死循环；服务端忽略该头时行为零变化。
         import uuid as _uuid
-        idem_key = str(_uuid.uuid5(_uuid.NAMESPACE_URL, qr_code))
+        idem_key = str(_uuid.uuid5(
+            _uuid.NAMESPACE_URL, f"{qr_code}|{verify_code}"))
         data = {
             "autoLogin": "true" if auto_login else "false",
             "qrCode": qr_code,
@@ -325,8 +336,9 @@ class KuroAPI:
             try:
                 response = self.session.post(url, data=data, headers=hdrs, timeout=timeout)
                 return response.json()
-            except requests.exceptions.Timeout:
-                last_error = f"请求超时(>{timeout}s)"
+            # M3修复：ConnectionError 同等进阶梯重试（见上）
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_error = f"请求超时(>{timeout}s)" if isinstance(e, requests.exceptions.Timeout) else f"连接失败: {e}"
                 if attempt < len(timeouts):
                     continue  # Try next timeout
             except Exception as e:

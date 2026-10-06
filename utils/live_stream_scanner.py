@@ -24,6 +24,7 @@ import importlib
 import math
 import os
 import queue
+import random
 import sys
 import threading
 import time
@@ -199,10 +200,8 @@ class LiveStreamScanner(QThread):
         """后台落盘抢码录像（不阻塞采集线程）。"""
         try:
             from utils.config_manager import config_manager as _cm4
-            import os
             import shutil as _shutil
             from datetime import datetime
-            import cv2
 
             record_dir = str(_cm4.get("grab_record_dir", "grab_records"))
             # 优化98：磁盘空间不足时停止录像并告警（<500MB）
@@ -217,8 +216,7 @@ class LiveStreamScanner(QThread):
                 pass
             # 优化95：清理 7 天前的旧录像（防无限增长）
             try:
-                import time as _t
-                now = _t.time()
+                now = time.time()
                 for entry in os.listdir(record_dir):
                     p = os.path.join(record_dir, entry)
                     if os.path.isdir(p) and (now - os.path.getmtime(p)) > 7 * 86400:
@@ -227,7 +225,11 @@ class LiveStreamScanner(QThread):
                 pass
             os.makedirs(record_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            subdir = os.path.join(record_dir, f"{ts}_{ticket[:12]}")
+            # H2修复：ticket 来自主播展示的二维码内容，可能含路径分隔符；
+            # 白名单过滤防路径遍历
+            import re as _re
+            safe_ticket = _re.sub(r"[^A-Za-z0-9_-]", "_", ticket[:12])
+            subdir = os.path.join(record_dir, f"{ts}_{safe_ticket}")
             os.makedirs(subdir, exist_ok=True)
 
             for i, frame in enumerate(frames):
@@ -502,8 +504,7 @@ class LiveStreamScanner(QThread):
                         frames = list(self._record_buffer)
                         ticket = getattr(self, "_record_ticket", "unknown")
                         self._record_buffer.clear()
-                        import threading as _th
-                        _th.Thread(
+                        threading.Thread(
                             target=self._save_grab_record_async,
                             args=(frames, ticket),
                             daemon=True, name="GrabRecordSave",
@@ -632,8 +633,7 @@ class LiveStreamScanner(QThread):
             return
         # 优化7：ticket 去重加 5 分钟时间窗口——同一 ticket 5 分钟后
         # 视为新的（二维码刷新了），避免永久去重导致漏码。
-        import time as _t
-        now = _t.time()
+        now = time.time()
         if ticket == self._last_ticket and (now - self._last_ticket_ts) < 300:
             return
         self._last_ticket = ticket
@@ -716,11 +716,22 @@ class LiveStreamScanner(QThread):
         stream_url = info.url
 
         # 打开视频流
+        # M1修复：先赋局部变量再持锁赋值，避免与 stop()/_release_cap 竞态
+        #（不要持锁做网络 open，会阻塞 stop）
         try:
-            self.cap = self._open_capture(stream_url)
-            if not self.is_running:
-                # stop() was called while the capture was opening
-                self._release_cap()
+            cap = self._open_capture(stream_url)
+            with self._cap_lock:
+                if not self.is_running:
+                    # stop() was called while the capture was opening
+                    self.cap = None
+                else:
+                    self.cap = cap
+                    cap = None  # 已移交，不再释放
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
                 return
 
             if not self.cap.isOpened():
@@ -750,9 +761,12 @@ class LiveStreamScanner(QThread):
                             logger.warning("[Live] %.0f 秒无帧，疑似卡顿", STALL_SECONDS)
                             self._degrade_on_reconnect = True
                         # Attempt reconnection with exponential backoff
-                        if not self._try_reconnect(stream_url):
+                        # M6：用返回的实际 URL 更新本地变量
+                        new_url = self._try_reconnect(stream_url)
+                        if not new_url:
                             self.error_occurred.emit("直播流中断，多次重连失败，已停止")
                             break
+                        stream_url = new_url
                         self._frame_diff.reset()
                         self._static_frames = 0
                         last_frame_ts = time.time()
@@ -837,7 +851,7 @@ class LiveStreamScanner(QThread):
         )
         return interval, max_tries
 
-    def _try_reconnect(self, stream_url: str) -> bool:
+    def _try_reconnect(self, stream_url: str) -> Optional[str]:
         """Reconnect in two phases: burst, then circuit-breaker slow polling.
 
         Phase 1 (burst): fast path first, then refresh + backoff.
@@ -850,17 +864,19 @@ class LiveStreamScanner(QThread):
         (default every 30s, up to 20 times) instead of hammering the
         server or abandoning the watch entirely.
 
-        Returns True if reconnection succeeds, False if abandoned/stopped.
+        Returns the effective stream URL on success, None if abandoned/stopped.
+        M6修复：调用方需用返回的 URL 更新本地变量，否则下次中断时
+        fast-path 先试已失效的旧地址，白白多一次失败（~100-300ms）。
         """
         if not self.is_running:
-            return False
+            return None
 
         # Phase 1: burst.
         # Fast path: transient blip – the URL is probably still good.
         self.status_changed.emit("直播流中断，立即重试...")
         if self._try_reopen(stream_url):
             self._on_reconnected()
-            return True
+            return stream_url
 
         # Slow path: the URL may have expired – refresh it, then back off.
         # (Bilibili/Douyin URLs are short-lived.)
@@ -882,11 +898,10 @@ class LiveStreamScanner(QThread):
         delays = self.RECONNECT_FAST_DELAYS
         for attempt in range(self.MAX_RECONNECT_ATTEMPTS):
             if not self.is_running:
-                return False
+                return None
             delay = delays[attempt] if attempt < len(delays) else delays[-1]
             # 优化25：加 ±20% jitter，避免多实例同时重连打爆服务器
-            import random as _rand
-            delay = delay * (0.8 + 0.4 * _rand.random())
+            delay = delay * (0.8 + 0.4 * random.random())
             self.status_changed.emit(
                 "直播流中断，正在重连 (%d/%d)..."
                 % (attempt + 1, self.MAX_RECONNECT_ATTEMPTS)
@@ -894,7 +909,7 @@ class LiveStreamScanner(QThread):
             time.sleep(delay)
             if self._try_reopen(url):
                 self._on_reconnected()
-                return True
+                return url
 
         # Phase 2: circuit breaker – low-frequency polling.
         interval, max_tries = self._reconnect_config()
@@ -907,12 +922,12 @@ class LiveStreamScanner(QThread):
             )
             # 可中断的 sleep：stop() 能立即打断，不用干等整个 interval
             if self._interruptible_sleep(interval):
-                return False  # stopped during sleep
+                return None  # stopped during sleep
             url = self._refresh_stream_url() or url
             if self._try_reopen(url):
                 self._on_reconnected()
-                return True
-        return False
+                return url
+        return None
 
     def _on_reconnected(self):
         """重连成功后的统一状态复位。"""

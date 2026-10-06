@@ -1105,6 +1105,15 @@ class MainWindow(QMainWindow):
             if self.live_scanner and self.live_scanner.is_running:
                 self.add_log("直播扫描已在运行，跳过定时触发")
                 return
+            # M5修复：定时抢码是无人值守场景，on_start_live_scan 内的
+            # QMessageBox 会阻塞事件循环导致对话框堆积；先校验，不满足
+            # 只记日志不弹窗
+            if self.selected_account_index == -1:
+                self.add_log("⏰ 定时触发跳过：未选择账号")
+                return
+            if not self.live_room_input.text().strip():
+                self.add_log("⏰ 定时触发跳过：未输入直播间")
+                return
             self.on_start_live_scan()
         except Exception as e:
             self.add_log(f"定时触发失败: {e}")
@@ -1254,7 +1263,10 @@ class MainWindow(QMainWindow):
             self.live_scanner.stop()
             # 有界等待：若底层网络 read 不响应 release，无限 wait 会永久冻住 UI
             if not self.live_scanner.wait(5000):
-                self.add_log("⚠ 直播线程停止超时，已放行（线程将自行退出）")
+                # M2修复：超时说明旧线程仍在运行，此时调 start() 是 no-op，
+                # 会导致"UI显示新房间、实际监控旧房间"的静默错误；直接报错返回
+                self.add_log("❌ 旧直播线程停止超时，请稍后重试")
+                return
 
         # 设置 token
         token = account_manager.get_account_token(self.selected_account_index)
@@ -1447,9 +1459,11 @@ class MainWindow(QMainWindow):
             self._stop_all_scanners()
 
             # #3 自动退出
+            # M4修复：PySide6 的 slot 包装器会吞掉 SystemExit，sys.exit(0)
+            # 可能退不出；用 QApplication.quit() 可靠退出
             if config_manager.get("auto_exit", False):
                 self.add_log("自动退出已启用，3秒后退出...")
-                QTimer.singleShot(3000, lambda: sys.exit(0))
+                QTimer.singleShot(3000, QApplication.instance().quit)
 
         elif result.get("need_sms"):
             # ---- #5 短信验证专用对话框 ----
