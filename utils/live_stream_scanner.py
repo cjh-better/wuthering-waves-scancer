@@ -3,11 +3,12 @@
 直播流QR码扫描器（支持B站、抖音等平台）
 使用OpenCV读取直播流，无需额外安装FFmpeg
 
-Optimized based on MHY_Scanner architecture:
-- Unified LiveStreamInfo return type (status + url + headers)
-- Safe JSON parsing with HTTP error checking
-- Douyin pull_datas + live_core_sdk_data dual-path fallback
-- FFmpeg low-latency parameters for faster QR detection
+Architecture:
+- URL resolution lives in ``utils.platforms`` (one adapter per
+  platform); this module only owns the capture → queue → decode
+  pipeline plus the Qt thread plumbing.
+- Importing ``LiveStreamInfo`` / ``LiveStreamStatus`` /
+  ``DEFAULT_SCAN_FRAME_STRIDE`` from here keeps working (re-exported).
 
 Performance design (v3.1):
 - Capture and decode run on separate threads: the QThread pumps frames
@@ -20,49 +21,40 @@ Performance design (v3.1):
 """
 import cv2
 import importlib
-import json
 import math
 import os
 import queue
-import re
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
-from enum import IntEnum
-from typing import Dict, List, Optional, Callable
+from typing import Dict, Optional
 
 import requests
-from PIL import Image
 from PySide6.QtCore import QThread, Signal
 
+from utils import http as http_utils
 from utils.log import get_logger
+from utils.platforms import (
+    BilibiliAdapter,
+    DouyinAdapter,
+    LiveStreamInfo,
+    LiveStreamStatus,
+)
+from utils.platforms import douyin as douyin_module
 from utils.qr_payload import extract_kuro_ticket
 
 
+# Re-exported for backward compatibility (tests and ui import from here).
+__all__ = [
+    "LiveStreamScanner",
+    "LiveStreamInfo",
+    "LiveStreamStatus",
+    "DEFAULT_SCAN_FRAME_STRIDE",
+    "get_live_stream_scanner",
+]
+
+
 logger = get_logger("LiveStream")
-
-
-class LiveStreamStatus(IntEnum):
-    """Live stream status codes (mirrors MHY_Scanner LiveStreamStatus)."""
-    Normal = 0
-    Absent = 1
-    NotLive = 2
-    Error = 3
-
-
-@dataclass
-class LiveStreamInfo:
-    """Bundled result of a live stream query (status + url + headers).
-
-    Ported from MHY_Scanner's ``LiveStreamInfo`` struct so that callers
-    get status and URL in a single call instead of two separate methods.
-    """
-    status: LiveStreamStatus
-    url: str = ""
-    headers: Dict[str, str] = field(default_factory=dict)
-    detail: str = ""  # human-readable failure reason, shown to the user
-                      # (e.g. "HTTP 403", "接口返回空响应(疑似被风控)")
 
 
 # FFmpeg low-latency options applied when opening a stream.
@@ -76,52 +68,6 @@ _FFMPEG_LOW_LATENCY_OPTS = (
 )
 
 DEFAULT_SCAN_FRAME_STRIDE = 3
-
-# ----------------------------------------------------------------------
-# Platform API constants (kept in one place instead of inline literals)
-# ----------------------------------------------------------------------
-_BILIBILI_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/110.0.0.0 Safari/537.36 Edg/110.0.1587.41"
-)
-_DOUYIN_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/92.0.4515.159 Safari/537.36"
-)
-_BILIBILI_HEADERS = {
-    "User-Agent": _BILIBILI_UA,
-    "Referer": "https://live.bilibili.com",
-}
-_DOUYIN_HEADERS = {
-    "User-Agent": _DOUYIN_UA,
-    "Referer": "https://live.douyin.com/",
-}
-_BILIBILI_ROOM_INIT_URL = "https://api.live.bilibili.com/room/v1/Room/room_init"
-_BILIBILI_PLAY_INFO_URL = (
-    "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo"
-)
-_DOUYIN_ROOM_URL = "https://live.douyin.com/webcast/room/web/enter/"
-_DOUYIN_API_PARAMS = (
-    "aid=6383&app_name=douyin_web&live_id=1"
-    "&device_platform=web&browser_language=zh-CN"
-    "&browser_platform=Win32&browser_name=Edge"
-    "&browser_version=139.0.0.0"
-    "&is_need_double_stream=false"
-)
-_BILIBILI_API_TIMEOUT = 5
-_DOUYIN_API_TIMEOUT = 10
-
-# Douyin HTML fallback channel (used when the web/enter JSON API returns
-# HTTP 200 with an empty body – suspected wind-control).
-_DOUYIN_ROOM_PAGE_URL = "https://live.douyin.com/%s"
-_DOUYIN_HTML_TIMEOUT = 10
-# Bytes scanned after a "stream_url" key when extracting the stream URL
-# from the (escaped) embedded JSON of the room HTML page.
-_HTML_STREAM_LOOKAHEAD = 65536
-# Length of the response-body preview written to the diagnostics log.
-_DIAG_PREVIEW_LEN = 200
 
 # Decode pipeline tuning
 _MAX_SCAN_STRIDE = 30          # hard ceiling for the adaptive stride
@@ -166,7 +112,7 @@ def _get_optional_module(name: str):
 
 
 class LiveStreamScanner(QThread):
-    """直播流扫描器"""
+    """直播流扫描器（抓帧 → 有界队列 → 解码工作线程）"""
 
     # 信号
     qr_detected = Signal(str)  # 检测到QR码
@@ -179,31 +125,34 @@ class LiveStreamScanner(QThread):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.stream_url = ""
-        self.is_running = False
+        self.stream_url: str = ""
+        self.is_running: bool = False
         self.cap = None
         self._cap_lock = threading.Lock()
-        self.platform = "bilibili"  # bilibili, douyin
-        self.scan_frame_stride = self._load_scan_frame_stride()
+        self.platform: str = "bilibili"  # bilibili, douyin
+        self.scan_frame_stride: int = self._load_scan_frame_stride()
         # Effective stride may grow at runtime when decoding is expensive.
-        self._scan_stride = self.scan_frame_stride
+        self._scan_stride: int = self.scan_frame_stride
         self._decode_ewma_ms: Optional[float] = None
 
         # Reuse one HTTP session for all platform API calls so TCP/TLS
-        # connections are pooled instead of re-established per request.
-        self._session = requests.Session()
+        # connections are pooled instead of re-established per request,
+        # and cookies (e.g. Douyin's ttwid) persist across calls.
+        # NOTE: tests patch this attribute, so adapters are constructed
+        # per call from ``self._session`` (see ``get_live_stream_info``).
+        self._session: requests.Session = http_utils.new_session()
 
         # Decode pipeline: capture thread -> bounded queue -> decode worker.
         self._frame_queue: Optional[queue.Queue] = None
         self._decode_thread: Optional[threading.Thread] = None
         self._decode_stop = threading.Event()
-        self._decode_queue_size = self._load_int_config(
+        self._decode_queue_size: int = self._load_int_config(
             "live_decode_queue_size", 2, 1, 8
         )
-        self._decode_budget_ms = self._load_float_config(
+        self._decode_budget_ms: float = self._load_float_config(
             "live_decode_budget_ms", 150.0, 20.0, 2000.0
         )
-        self._last_ticket = ""
+        self._last_ticket: str = ""
 
     # ------------------------------------------------------------------
     # Config helpers
@@ -234,7 +183,7 @@ class LiveStreamScanner(QThread):
             "live_scan_frame_stride", DEFAULT_SCAN_FRAME_STRIDE, 1, _MAX_SCAN_STRIDE
         )
 
-    def set_stream_url(self, url: str, platform: str = "bilibili"):
+    def set_stream_url(self, url: str, platform: str = "bilibili") -> None:
         """
         设置直播流地址
 
@@ -246,7 +195,7 @@ class LiveStreamScanner(QThread):
         self.platform = platform
 
     # ------------------------------------------------------------------
-    # Platform stream fetchers
+    # Platform dispatch (thin facades over utils.platforms adapters)
     # ------------------------------------------------------------------
 
     def get_live_stream_info(self, room_id: str, platform: str) -> LiveStreamInfo:
@@ -265,444 +214,34 @@ class LiveStreamScanner(QThread):
             return LiveStreamInfo(status=LiveStreamStatus.Error)
         return fetcher(room_id)
 
-    # -- Bilibili -------------------------------------------------------
+    # -- Backward-compatible facades (kept for tests / external callers) --
 
     def _get_bilibili_stream_info(self, room_id: str) -> LiveStreamInfo:
-        """Fetch Bilibili stream info.
-
-        Uses the ``room_init`` API to resolve the real room ID, then
-        ``getRoomPlayInfo`` (v2) to obtain the stream URL.  HTTP errors
-        and malformed JSON are handled defensively (ported from
-        MHY_Scanner ``LiveBili::GetLiveStreamInfo``).
-        """
-        try:
-            # Step 1 – room_init (get real room ID + live status)
-            r = self._session.get(
-                _BILIBILI_ROOM_INIT_URL,
-                params={"id": room_id},
-                timeout=_BILIBILI_API_TIMEOUT,
-            )
-            if r.status_code != 200:
-                self._diag_response("Bilibili/room_init", r)
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="网络请求失败(HTTP %s)" % r.status_code,
-                )
-
-            room_info = self._safe_json(r.text)
-            if room_info is None:
-                self._diag_response("Bilibili/room_init", r)
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="接口返回空响应或非法JSON",
-                )
-
-            code = room_info.get("code")
-            if code == 60004:
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.Absent, detail="房间不存在"
-                )
-            if code != 0:
-                self._diag_response("Bilibili/room_init", r)
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="接口报错(code=%s)" % code,
-                )
-
-            live_status = room_info["data"]["live_status"]
-            if live_status != 1:
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.NotLive, detail="主播未开播"
-                )
-
-            real_room_id = room_info["data"]["room_id"]
-
-            # Step 2 – getRoomPlayInfo (v2)
-            params = {
-                "room_id": real_room_id,
-                "protocol": "0,1",
-                "format": "0,2",
-                "codec": "0",
-                "only_audio": "0",
-                "only_video": "0",
-                "qn": "10000",
-            }
-            r = self._session.get(
-                _BILIBILI_PLAY_INFO_URL, params=params, timeout=_BILIBILI_API_TIMEOUT
-            )
-            if r.status_code != 200:
-                self._diag_response("Bilibili/play_info", r)
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="网络请求失败(HTTP %s)" % r.status_code,
-                )
-
-            play_info = self._safe_json(r.text)
-            if play_info is None:
-                self._diag_response("Bilibili/play_info", r)
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="接口返回空响应或非法JSON",
-                )
-
-            stream_url = self._parse_bilibili_play_info(play_info)
-            if not stream_url:
-                self._diag_response("Bilibili/play_info", r)
-                return LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="解析失败：未找到可用流地址",
-                )
-
-            return LiveStreamInfo(
-                status=LiveStreamStatus.Normal,
-                url=stream_url,
-                headers=dict(_BILIBILI_HEADERS),
-            )
-        except Exception as e:
-            logger.warning("[LiveStream] Bilibili fetch error: %s", e)
-            return LiveStreamInfo(
-                status=LiveStreamStatus.Error, detail="请求异常：%s" % e
-            )
-
-    @staticmethod
-    def _parse_bilibili_play_info(play_info: dict) -> str:
-        """Extract the first usable stream URL from ``getRoomPlayInfo``.
-
-        Walks all streams/formats/codecs/url_infos and returns the first
-        complete URL.  In the common case this is identical to the old
-        "first entry" behaviour, but it no longer fails when the first
-        entry is missing a host or token.
-        """
-        try:
-            streams = play_info["data"]["playurl_info"]["playurl"]["stream"]
-        except (KeyError, TypeError):
-            return ""
-        if not isinstance(streams, list):
-            return ""
-        for stream in streams:
-            if not isinstance(stream, dict):
-                continue
-            for fmt in stream.get("format", []) or []:
-                if not isinstance(fmt, dict):
-                    continue
-                for codec in fmt.get("codec", []) or []:
-                    if not isinstance(codec, dict):
-                        continue
-                    base_url = codec.get("base_url", "")
-                    for url_info in codec.get("url_info", []) or []:
-                        if not isinstance(url_info, dict):
-                            continue
-                        host = url_info.get("host", "")
-                        extra = url_info.get("extra", "")
-                        if host and base_url:
-                            url = "%s%s%s" % (host, base_url, extra)
-                            if url.startswith("http"):
-                                return url
-        return ""
-
-    # -- Douyin ---------------------------------------------------------
+        """Legacy entry point – delegates to :class:`BilibiliAdapter`."""
+        return BilibiliAdapter(self._session).fetch(room_id)
 
     def _get_douyin_stream_info(self, room_id: str) -> LiveStreamInfo:
-        """Fetch Douyin stream info (JSON API with HTML fallback).
+        """Legacy entry point – delegates to :class:`DouyinAdapter`."""
+        return DouyinAdapter(self._session).fetch(room_id)
 
-        The ``web/enter`` JSON API currently returns HTTP 200 with an empty
-        body for many users (suspected wind-control).  When the API channel
-        fails without an authoritative answer, we fall back to parsing the
-        room HTML page, which embeds the same stream data.  No signature
-        reverse engineering is involved – best effort only.
-        """
-        try:
-            info, try_html = self._get_douyin_stream_info_api(room_id)
-            if info.status == LiveStreamStatus.Normal:
-                return info
-            if not try_html:
-                return info
-            logger.info(
-                "[LiveStream] Douyin API channel failed (%s), trying HTML fallback",
-                info.detail,
-            )
-            html_info = self._get_douyin_stream_info_html(room_id)
-            if html_info.status == LiveStreamStatus.Normal:
-                return html_info
-            # Neither channel worked – combine both reasons for the user.
-            combined = info.detail or "未知错误"
-            if html_info.detail:
-                combined = "%s；HTML备用通道：%s" % (combined, html_info.detail)
-            return LiveStreamInfo(status=info.status, detail=combined)
-        except Exception as e:
-            logger.warning("[LiveStream] Douyin fetch error: %s", e)
-            return LiveStreamInfo(
-                status=LiveStreamStatus.Error, detail="请求异常：%s" % e
-            )
-
-    def _get_douyin_stream_info_api(self, room_id: str):
-        """Query the ``web/enter`` JSON API.
-
-        Returns a ``(LiveStreamInfo, try_html_fallback)`` tuple.  The HTML
-        fallback is only worth trying when the API did not give an
-        authoritative answer (HTTP error / empty body / invalid JSON);
-        a valid "room absent / not live" response is final.
-        """
-        params = "%s&web_rid=%s" % (_DOUYIN_API_PARAMS, room_id)
-        url = "%s?%s" % (_DOUYIN_ROOM_URL, params)
-
-        try:
-            r = self._session.get(
-                url, headers=_DOUYIN_HEADERS, timeout=_DOUYIN_API_TIMEOUT
-            )
-        except Exception as e:
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="网络请求异常：%s" % e,
-                ),
-                True,
-            )
-
-        if r.status_code != 200:
-            self._diag_response("Douyin/web_enter", r)
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="网络请求失败(HTTP %s)" % r.status_code,
-                ),
-                True,
-            )
-
-        body = r.text or ""
-        if not body.strip():
-            self._diag_response("Douyin/web_enter", r)
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="接口返回空响应(疑似被风控)",
-                ),
-                True,
-            )
-
-        info = self._safe_json(body)
-        if info is None:
-            self._diag_response("Douyin/web_enter", r)
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="接口返回非法JSON",
-                ),
-                True,
-            )
-
-        if info.get("status_code") != 0:
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Absent,
-                    detail="房间不存在(接口 status_code=%s)"
-                    % info.get("status_code"),
-                ),
-                False,
-            )
-
-        data_arr = info.get("data", {}).get("data", [])
-        if not data_arr:
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Absent,
-                    detail="房间不存在(接口无房间数据)",
-                ),
-                False,
-            )
-
-        room_data = data_arr[0]
-        status = room_data.get("status")
-        if status == 4:
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.NotLive, detail="主播未开播"
-                ),
-                False,
-            )
-        if status != 2:
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="未知的房间状态(status=%s)" % status,
-                ),
-                False,
-            )
-
-        # Extract FLV URL (try pull_datas first, then live_core_sdk_data)
-        flv_url = self._parse_douyin_stream(room_data)
-        if not flv_url:
-            self._diag_response("Douyin/web_enter", r)
-            return (
-                LiveStreamInfo(
-                    status=LiveStreamStatus.Error,
-                    detail="解析失败：接口未返回可用流地址",
-                ),
-                False,
-            )
-
-        return LiveStreamInfo(status=LiveStreamStatus.Normal, url=flv_url), False
-
-    def _get_douyin_stream_info_html(self, room_id: str) -> LiveStreamInfo:
-        """Fallback: fetch the room HTML page and extract the stream URL.
-
-        The page embeds the room JSON with backslash-escaped quotes, so the
-        extraction uses escape-tolerant regexes scoped to the text following
-        a ``stream_url`` key instead of full JSON parsing.
-        """
-        url = _DOUYIN_ROOM_PAGE_URL % room_id
-        try:
-            r = self._session.get(
-                url, headers=_DOUYIN_HEADERS, timeout=_DOUYIN_HTML_TIMEOUT
-            )
-        except Exception as e:
-            return LiveStreamInfo(
-                status=LiveStreamStatus.Error, detail="请求异常：%s" % e
-            )
-
-        self._diag_response("Douyin/room_html", r)
-        if r.status_code != 200:
-            return LiveStreamInfo(
-                status=LiveStreamStatus.Error,
-                detail="页面加载失败(HTTP %s)" % r.status_code,
-            )
-
-        html = r.text or ""
-        if not html.strip():
-            return LiveStreamInfo(
-                status=LiveStreamStatus.Error, detail="页面返回空内容"
-            )
-
-        flv_url = self._extract_flv_from_html(html)
-        if flv_url:
-            return LiveStreamInfo(
-                status=LiveStreamStatus.Normal,
-                url=flv_url,
-                detail="经由HTML备用通道获取",
-            )
-        return LiveStreamInfo(
-            status=LiveStreamStatus.Error,
-            detail="页面未包含直播流地址(房间可能未开播，或页面结构已变化)",
-        )
+    @staticmethod
+    def _parse_douyin_stream(room_data: dict) -> str:
+        """Legacy entry point – delegates to ``platforms.douyin``."""
+        return douyin_module.parse_stream_url(room_data)
 
     @staticmethod
     def _extract_flv_from_html(html: str) -> str:
-        """Extract a playable stream URL from a Douyin room HTML page.
-
-        The room JSON is embedded with escaped quotes (``\\"`` and
-        sometimes ``\\\\"``), so both the key lookup and the URL capture
-        tolerate stray backslashes.  The search is scoped to the text
-        following a ``stream_url`` key to avoid picking up unrelated media
-        URLs elsewhere on the page.  Prefers FLV (same as the API path),
-        falls back to HLS, then to any ``.flv`` URL on the page.
-        """
-        if not html:
-            return ""
-        key_pat = re.compile(r'(?:\\)*"stream_url')
-        url_pat = re.compile(
-            r'(?:\\)*"(flv|hls)(?:\\)*"\s*:(?:\\)*"(https?://[^"\\<>\s]+)'
-        )
-        hls_url = ""
-        for m in key_pat.finditer(html):
-            window = html[m.end(): m.end() + _HTML_STREAM_LOOKAHEAD]
-            for um in url_pat.finditer(window):
-                url = um.group(2)
-                if not url.startswith("http"):
-                    continue
-                if um.group(1) == "flv":
-                    return url
-                if not hls_url:
-                    hls_url = url
-        if hls_url:
-            return hls_url
-        # Last resort: any .flv URL on the page (structure may have changed).
-        loose = re.search(r'https?://[^"\\<>\s]+\.flv[^"\\<>\s]*', html)
-        if loose:
-            logger.warning(
-                "[LiveStream] HTML fallback fell back to loose .flv match"
-            )
-            return loose.group(0)
-        return ""
-
-    def _parse_douyin_stream(self, room_data: dict) -> str:
-        """Extract FLV URL from Douyin room data.
-
-        Tries every ``pull_datas`` entry first (first valid URL wins),
-        then falls back to ``live_core_sdk_data``.  This dual-path approach
-        is ported from MHY_Scanner's
-        ``LiveDouyin::GetStreamLinkFromResponse`` and fixes a missing
-        fallback in the original KuRo_Scanner.
-        """
-        stream_url = room_data.get("stream_url", {})
-        if not isinstance(stream_url, dict):
-            return ""
-
-        # Path 1: pull_datas (newer API)
-        pull_datas = stream_url.get("pull_datas")
-        if isinstance(pull_datas, dict):
-            for entry in pull_datas.values():
-                url = self._extract_douyin_flv(entry)
-                if url:
-                    return url
-
-        # Path 2: live_core_sdk_data (older API)
-        core_sdk = stream_url.get("live_core_sdk_data", {})
-        if isinstance(core_sdk, dict):
-            pull_data = core_sdk.get("pull_data", {})
-            url = self._extract_douyin_flv(pull_data)
-            if url:
-                return url
-
-        return ""
-
-    def _extract_douyin_flv(self, entry) -> str:
-        """Pull the ``origin/main/flv`` URL out of one stream-data entry."""
-        if not isinstance(entry, dict):
-            return ""
-        stream_data_str = entry.get("stream_data", "")
-        if not isinstance(stream_data_str, str) or not stream_data_str:
-            return ""
-        sd = self._safe_json(stream_data_str)
-        if not sd:
-            return ""
-        try:
-            return sd["data"]["origin"]["main"]["flv"] or ""
-        except (KeyError, TypeError):
-            return ""
-
-    # -- Helpers --------------------------------------------------------
-
-    def _diag_response(self, tag: str, response) -> None:
-        """Log HTTP diagnostics for a platform API call.
-
-        Records the status code, body length and a truncated preview of the
-        body – exactly what a user needs to paste when reporting
-        "无法获取直播流地址", so keep it compact.
-        """
-        try:
-            body = response.text or ""
-            preview = body[:_DIAG_PREVIEW_LEN].replace("\n", " ").replace("\r", " ")
-            logger.warning(
-                "[%s] status=%s body_len=%d preview=%r",
-                tag,
-                response.status_code,
-                len(body),
-                preview,
-            )
-        except Exception:
-            pass
+        """Legacy entry point – delegates to ``platforms.douyin``."""
+        return douyin_module.extract_flv_from_html(html)
 
     @staticmethod
-    def _safe_json(text: str) -> Optional[dict]:
-        """Parse JSON defensively, returning *None* on failure.
+    def _safe_json(text: object) -> Optional[dict]:
+        """Legacy entry point – delegates to ``utils.http.safe_json``."""
+        return http_utils.safe_json(text)
 
-        Equivalent to MHY_Scanner's ``json::parse(text, nullptr, false)``
-        + ``is_discarded()`` check.
-        """
-        try:
-            return json.loads(text)
-        except (ValueError, TypeError):
-            return None
+    # ------------------------------------------------------------------
+    # Stream URL refresh / capture helpers
+    # ------------------------------------------------------------------
 
     def _refresh_stream_url(self) -> str:
         """Re-fetch the stream URL before reconnecting.
@@ -738,7 +277,7 @@ class LiveStreamScanner(QThread):
     # Capture / decode pipeline
     # ------------------------------------------------------------------
 
-    def _release_cap(self):
+    def _release_cap(self) -> None:
         """Release the current capture exactly once (idempotent, thread-safe).
 
         ``stop()`` (UI thread), ``cleanup()`` and ``_try_reconnect()`` (scan
@@ -753,7 +292,7 @@ class LiveStreamScanner(QThread):
             except Exception:
                 pass
 
-    def _enqueue_frame(self, frame):
+    def _enqueue_frame(self, frame) -> None:
         """Hand a frame to the decode worker, dropping the oldest when full.
 
         Dropping the *oldest* (not the newest) keeps decode working on the
@@ -774,7 +313,7 @@ class LiveStreamScanner(QThread):
             except queue.Full:
                 pass
 
-    def _start_decode_worker(self):
+    def _start_decode_worker(self) -> None:
         """Start the background decode worker (single consumer, FIFO)."""
         self._frame_queue = queue.Queue(maxsize=self._decode_queue_size)
         self._decode_stop.clear()
@@ -783,7 +322,7 @@ class LiveStreamScanner(QThread):
         )
         self._decode_thread.start()
 
-    def _stop_decode_worker(self):
+    def _stop_decode_worker(self) -> None:
         """Signal the decode worker to exit and wait for it (bounded)."""
         thread = self._decode_thread
         if thread is None:
@@ -799,7 +338,7 @@ class LiveStreamScanner(QThread):
         thread.join(timeout=_DECODE_JOIN_TIMEOUT)
         self._frame_queue = None
 
-    def _decode_loop(self):
+    def _decode_loop(self) -> None:
         """Decode worker: pull frames FIFO and run the QR decoder."""
         while not self._decode_stop.is_set():
             q = self._frame_queue
@@ -813,7 +352,7 @@ class LiveStreamScanner(QThread):
                 break
             self._decode_frame(frame)
 
-    def _decode_frame(self, frame):
+    def _decode_frame(self, frame) -> None:
         """Decode one frame, de-duplicate, and adapt the scan cadence."""
         started = time.perf_counter()
         try:
@@ -834,13 +373,18 @@ class LiveStreamScanner(QThread):
         self.qr_detected.emit(qr_code)
         self.status_changed.emit("检测到QR码: %s..." % ticket[:8])
 
-    def _observe_decode_time(self, dt_ms: float):
+    def _observe_decode_time(self, dt_ms: float) -> None:
         """Track decode latency (EWMA) and adapt the scan stride.
 
-        When decoding is expensive the stride grows so the worker isn't
-        permanently backlogged; when decoding is cheap the stride stays at
-        the configured value.  Assignment of a float is atomic under the
-        GIL, so the capture thread can read ``_scan_stride`` lock-free.
+        Why adaptive instead of a fixed stride: decode cost is dynamic –
+        it depends on frame complexity (QR present? motion blur?) and on
+        the machine. A fixed stride either wastes CPU on fast machines or
+        lets the queue backlog grow on slow ones. The EWMA smooths out
+        single-frame spikes so the stride doesn't jitter; the stride only
+        ever grows (never below the configured value), so behaviour on a
+        fast machine is identical to before.
+        Assignment of a float is atomic under the GIL, so the capture
+        thread can read ``_scan_stride`` lock-free.
         """
         prev = self._decode_ewma_ms
         self._decode_ewma_ms = (
@@ -856,7 +400,7 @@ class LiveStreamScanner(QThread):
     # Main loop
     # ------------------------------------------------------------------
 
-    def run(self):
+    def run(self) -> None:
         """主扫描循环（采集与解码分离，见模块 docstring）"""
         self.is_running = True
         self._last_ticket = ""
@@ -975,35 +519,26 @@ class LiveStreamScanner(QThread):
         return False
 
     def _scan_frame(self, image) -> Optional[str]:
-        """扫描单帧图像（解码热路径：模块导入已缓存，无每帧开销）"""
+        """扫描单帧图像（统一解码契约 ``decode(image) -> str | None``）。"""
         try:
             ai_module = _get_optional_module("utils.ai_qr_scanner")
-            ai_qr_scanner = ai_module.ai_qr_scanner
-
-            if hasattr(ai_qr_scanner, "try_decode_array") and hasattr(image, "shape"):
-                return ai_qr_scanner.try_decode_array(image, color="BGR")
-            return ai_qr_scanner.try_decode_qr(image)
+            return ai_module.ai_qr_scanner.decode(image)
         except Exception as e:
             try:
                 qr_module = _get_optional_module("utils.qr_scanner")
-                qr_scanner = qr_module.qr_scanner
-
-                if hasattr(image, "shape"):
-                    rgb_frame = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    image = Image.fromarray(rgb_frame)
-                return qr_scanner.try_decode_qr(image)
+                return qr_module.qr_scanner.decode(image)
             except Exception:
                 logger.warning("[LiveStream] Scan error: %s", e)
                 return None
 
-    def stop(self):
+    def stop(self) -> None:
         """停止扫描（线程安全：释放 capture 以解阻塞 cap.read()）"""
         self.is_running = False
         # Release the capture to unblock any pending cap.read()
         self._release_cap()
         self.status_changed.emit("正在停止...")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """清理资源（幂等：可与 stop() 任意顺序调用）"""
         self._release_cap()
         self.is_running = False
