@@ -79,26 +79,29 @@ class RoomMonitorThread(QThread):
         from utils import http as http_utils
         # 线程生命周期内复用一个 session（cookie 保持、连接复用）
         session = http_utils.new_session()
-        while self._running:
-            rooms = self._get_rooms()
-            for platform, room_id, name in rooms:
-                if not self._running:
-                    break
-                status_name, title = self._check_one(session, platform, room_id)
-                key = (platform, room_id)
-                prev = self._last_status.get(key)
-                self._last_status[key] = status_name
-                self.room_status.emit(platform, room_id, status_name, title)
-                # 跃迁通知：之前不是开播，现在开播了
-                if status_name == LiveStreamStatus.Normal.name and prev != LiveStreamStatus.Normal.name:
-                    display = name or room_id
-                    self.room_live.emit(platform, room_id, display)
-                    logger.info("[RoomMonitor] 🔴 %s 开播了！", display)
-            # 可中断的等待（sleep 不超过剩余时间，避免 overshoot）
-            deadline = time.monotonic() + self._interval
+        try:
             while self._running:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(0.5, remaining))
+                rooms = self._get_rooms()
+                for platform, room_id, name in rooms:
+                    if not self._running:
+                        break
+                    status_name, title = self._check_one(session, platform, room_id)
+                    key = (platform, room_id)
+                    prev = self._last_status.get(key)
+                    self._last_status[key] = status_name
+                    self.room_status.emit(platform, room_id, status_name, title)
+                    # 跃迁通知：之前不是开播，现在开播了
+                    if status_name == LiveStreamStatus.Normal.name and prev != LiveStreamStatus.Normal.name:
+                        display = name or room_id
+                        self.room_live.emit(platform, room_id, display)
+                        logger.info("[RoomMonitor] 🔴 %s 开播了！", display)
+                # 可中断的等待（sleep 不超过剩余时间，避免 overshoot）
+                deadline = time.monotonic() + self._interval
+                while self._running:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.5, remaining))
+        finally:
+            session.close()
         logger.info("[RoomMonitor] 监控线程退出")

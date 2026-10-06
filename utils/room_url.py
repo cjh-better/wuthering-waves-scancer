@@ -129,16 +129,19 @@ def _follow_redirects(url: str, timeout: float) -> str:
     session = new_session()
     attempt_timeout = timeout / 2
     try:
-        response = session.head(url, allow_redirects=True, timeout=attempt_timeout)
-        if response.url and response.url != url:
-            return response.url
-    except Exception:
-        pass
-    try:
-        response = session.get(url, allow_redirects=True, timeout=attempt_timeout, stream=True)
         try:
-            return response.url or ""
-        finally:
-            response.close()
-    except Exception:
-        return ""
+            response = session.head(url, allow_redirects=True, timeout=attempt_timeout)
+            if response.url and response.url != url:
+                return response.url
+        except Exception:
+            pass
+        try:
+            response = session.get(url, allow_redirects=True, timeout=attempt_timeout, stream=True)
+            try:
+                return response.url or ""
+            finally:
+                response.close()
+        except Exception:
+            return ""
+    finally:
+        session.close()
