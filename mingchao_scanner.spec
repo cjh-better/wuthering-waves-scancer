@@ -1,10 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
-import pyzbar
+try:
+    import pyzbar
+    pyzbar_path = os.path.dirname(pyzbar.__file__)
+except ImportError:
+    pyzbar_path = None
 
-
-pyzbar_path = os.path.dirname(pyzbar.__file__)
 icon_path = "icon.ico"
 png_path = "11409B.png"
 block_cipher = None
@@ -32,7 +34,7 @@ a = Analysis(
     binaries=[
         (os.path.join(pyzbar_path, "libiconv.dll"), "pyzbar"),
         (os.path.join(pyzbar_path, "libzbar-64.dll"), "pyzbar"),
-    ],
+    ] if pyzbar_path else [],
     datas=[
         (png_path, "."),
         ("ScanModel", "ScanModel"),
