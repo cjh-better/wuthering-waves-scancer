@@ -579,12 +579,12 @@ class MainWindow(QMainWindow):
         self.add_log("✓ DXGI GPU加速截图")
         self.add_log("✓ WeChat QR识别器")
         self.add_log("✓ 并行多候选识别（3线程）")
-        self.add_log("✓ 智能ROI区域预测 + 内存池复用")
+        self.add_log("✓ 智能ROI区域预测")
         self.add_log("✓ 智能阶梯式重试 + 组件预热")
         self.add_log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        # AI模型状态
-        self._log_ai_status()
+        # AI模型状态（模型懒加载：延迟展示，等后台预热完成）
+        QTimer.singleShot(4000, self._log_ai_status)
 
     def _log_ai_status(self):
         try:
@@ -1106,12 +1106,6 @@ class MainWindow(QMainWindow):
         stats_summary = perf_monitor.get_statistics_summary()
         method_distribution = perf_monitor.get_method_distribution()
         extra_info = []
-        try:
-            from utils.image_buffer_pool import image_buffer_pool
-            pool_stats = image_buffer_pool.get_stats()
-            extra_info.append(f"内存池: {pool_stats['total_buffers']}个缓冲区, {pool_stats['total_memory_mb']}MB")
-        except Exception:
-            pass
         try:
             from utils.smart_roi_detector import smart_roi_detector
             roi_stats = smart_roi_detector.get_stats()

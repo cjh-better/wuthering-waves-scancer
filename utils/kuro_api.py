@@ -122,7 +122,7 @@ class KuroAPI:
         except Exception:
             return -1
     
-    def set_token(self, token: str):
+    def set_token(self, token: str) -> None:
         """设置认证 token"""
         self.token = token
         self.headers["token"] = token
@@ -130,7 +130,7 @@ class KuroAPI:
         if not self._connection_warmed:
             self.warm_up_connection()
     
-    def warm_up_connection(self):
+    def warm_up_connection(self) -> None:
         """
         🚀 预热网络连接（在扫码前调用，提前建立TCP+TLS连接，节省100-300ms）
         """
@@ -242,22 +242,45 @@ class KuroAPI:
         
         return {"code": -1, "msg": last_error or "请求失败"}
     
-    def send_sms(self) -> Dict[str, Any]:
+    def send_sms(self, gee_test_data: str = "") -> Dict[str, Any]:
         """
         发送短信验证码
-        
+
+        Args:
+            gee_test_data: GeeTest 验证结果 JSON（服务端要求验证时传入，
+                照搬 KuRo_Scanner C++ 逻辑：验证通过后把
+                ``captchaObj.getValidate()`` 的 JSON 作为 geeTestData 重发）
+
         Returns:
             发送结果字典
         """
         url = f"{self.BASE_URL}/user/sms/scanSms"
-        data = "geeTestData="
-        
+        data = {"geeTestData": gee_test_data}
+
         try:
             response = self.session.post(url, data=data, headers=self.headers, timeout=5)
             result = response.json()
             return result
         except Exception as e:
             return {"code": -1, "msg": f"请求失败: {str(e)}"}
+
+    # 服务端要求 GeeTest 验证时的典型文案（启发式；命中新的 code/msg
+    # 时可随时扩充——见 is_captcha_required）。
+    _CAPTCHA_KEYWORDS = ("geetest", "极验", "滑块", "captcha")
+
+    @classmethod
+    def is_captcha_required(cls, result: Any) -> bool:
+        """启发式判断短信接口是否要求 GeeTest 验证。
+
+        保守策略：只有明确命中验证码相关文案才返回 True，避免误伤
+        正常失败（如"发送频繁"），那样会无故弹验证窗口。
+        """
+        if not isinstance(result, dict):
+            return False
+        if result.get("code") == 200:
+            return False
+        msg = str(result.get("msg", "")).lower()
+        return any(k in msg for k in cls._CAPTCHA_KEYWORDS)
 
 
 # 全局 API 实例

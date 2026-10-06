@@ -73,24 +73,72 @@ python main.py
 
 ```
 wuthering-waves-scanner/
-├── main.py                  # 程序入口
-├── config.json              # 配置文件
-├── requirements.txt         # Python依赖
-├── mingchao_scanner.spec    # PyInstaller打包配置
-├── ui/                      # UI界面模块
-│   ├── main_window.py       # 主窗口
-│   ├── login_dialog.py      # 登录对话框
-│   └── scan_window.py       # 扫描窗口
-├── utils/                   # 工具模块
-│   ├── kuro_api.py          # 库街区API
-│   ├── ai_qr_scanner.py     # AI扫描器
-│   ├── dxgi_screenshot.py   # GPU加速截图
-│   ├── live_stream_scanner.py  # 直播流扫描
-│   └── ...                  # 其他工具
-└── ScanModel/               # AI模型文件
-    ├── detect.caffemodel    # QR检测模型
-    └── sr.caffemodel        # 超分辨率模型
+├── main.py                  # 程序入口（崩溃诊断 + 资源自检 + QApplication）
+├── mypy.ini                 # 类型检查配置（utils.abogus 为 vendored 第三方，排除）
+├── mingchao_scanner.spec    # PyInstaller 打包配置
+├── ui/                      # 界面层（只做展示与交互，不含业务逻辑）
+│   ├── main_window.py       # 主窗口：账号管理 / 扫描控制 / 日志面板
+│   ├── login_dialog.py      # 库街区登录
+│   ├── sms_dialog.py        # 短信验证码（服务端要求时弹 GeeTest）
+│   ├── geetest_dialog.py    # GeeTest v4 滑块验证（QWebEngine + 本地 HTTP 服务）
+│   └── scan_window.py       # 屏幕扫描框（可拖动半透明窗口）
+├── utils/                   # 业务逻辑层
+│   ├── platforms/           # ★ 直播平台适配器（取流地址，与抓帧解码解耦）
+│   │   ├── base.py          #   LiveStreamStatus / StreamError / 适配器基类
+│   │   ├── bilibili.py      #   B站：room_init → getRoomPlayInfo
+│   │   └── douyin.py        #   抖音：房间页(含ttwid)→HTML提取→签名API
+│   ├── live_stream_scanner.py  # ★ 抓帧→有界队列→解码工作线程（QThread）
+│   ├── ai_qr_scanner.py     # ★ WeChatQR/Caffe 解码（模型懒加载，线程安全）
+│   ├── qr_scanner.py        # pyzbar 降级解码；与 ai_qr_scanner 共享
+│   │                        #   ImageDecoder 契约：decode(image) -> str | None
+│   ├── screenshot.py        # ★ 截图后端抽象（DXGI → BitBlt → PIL 链）
+│   ├── kuro_api.py          # 库街区 API（登录/扫码/短信，含连接预热）
+│   ├── abogus.py            # ★ 抖音 a_bogus 签名（vendored，MIT）
+│   ├── http.py              # 共享 HTTP 工具（Session 工厂/JSON/诊断日志）
+│   ├── resources.py         # ★ 打包资源完整性自检（ScanModel 缺失告警）
+│   ├── config_manager.py    # 配置（schema 化：类型+默认值+说明）
+│   ├── account_manager.py   # 多账号管理
+│   ├── secure_token_store.py# Token 加密存储（Windows DPAPI）
+│   ├── thread_pool_scanner.py# 通用线程池
+│   ├── smart_roi_detector.py# 屏幕扫描 ROI 预测（仅屏幕路径使用）
+│   ├── performance_monitor.py# 性能统计
+│   └── log.py               # ★ 统一日志出口（get_logger）
+└── ScanModel/               # AI 模型文件（detect/sr prototxt + caffemodel）
 ```
+
+### 数据流（5 分钟看懂）
+
+```
+直播流模式                          屏幕扫描模式
+─────────                          ──────────
+抖音/B站房间号                       拖动扫描框
+    │                                   │
+    ▼                                   ▼
+platforms 适配器取流地址            screenshot 后端链截图
+ (HTML提取→签名API双通道)             (DXGI→BitBlt→PIL)
+    │                                   │
+    ▼                                   ▼
+VideoCapture 抓帧 ──有界队列──▶ 解码工作线程 ──▶ ImageDecoder.decode()
+    (丢旧帧保实时)      (EWMA自适应步长)      (WeChatQR→pyzbar降级)
+    │                                               │
+    └────────────▶ 扫到二维码 ──▶ kuro_api 扫码登录 ──┘
+```
+
+关键设计取舍（为什么这样写）：
+- **抓帧与解码分离**：解码（WeChatQR 在高清帧上可达数百毫秒）一旦和抓帧串行，
+  TCP 缓冲区就会积压，延迟越积越高。分离 + 队列满丢旧帧 = 永远解最新的帧。
+- **EWMA 自适应步长**：解码耗时是动态的（画面复杂度/机器性能），固定步长要么
+  浪费 CPU 要么积压。用指数滑动平均跟踪耗时，超预算才降频，抖动小。
+- **抖音双通道**：`web/enter` JSON 接口会被风控掐成空 body，但房间 HTML 页
+  照常返回且内嵌同样的数据。HTML 提取在前（快、无签名开销），签名 API
+  在后（权威），两个都挂才报细分错误。
+- **a_bogus 签名**：抖音要求请求带签名才给数据。签名算法是公开实现
+  （vendored），签的是 urlencode 后的 query + 同一份 UA；ttwid 必须来自
+  服务器 Set-Cookie，自己编的会被拒绝——所以先 GET 房间页。
+- **解码锁**：WeChatQR/Caffe dnn 内部有状态、非线程安全，并发调即 native
+  segfault（issue #8 的根因）。所有原生解码调用经同一把锁串行。
+- **模型懒加载**：Caffe 模型加载阻塞启动数秒，移到首次解码/后台预热线程，
+  import 只做轻量初始化。
 
 ---
 

@@ -112,9 +112,19 @@ class SmsDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _send_sms(self):
-        """发送短信验证码并启动倒计时"""
+        """发送短信验证码并启动倒计时。
+
+        正常路径直接发送；若服务端要求 GeeTest 验证（见
+        ``KuroAPI.is_captcha_required``），弹出验证窗口，验证通过后
+        携带 geeTestData 重发（照搬 KuRo_Scanner C++ 逻辑）。
+        """
         from utils.kuro_api import kuro_api
         result = kuro_api.send_sms()
+        if kuro_api.is_captcha_required(result):
+            gee_data = self._run_geetest()
+            if gee_data is None:
+                return  # 用户取消 / 组件不可用：不启动倒计时
+            result = kuro_api.send_sms(gee_data)
         if result.get("code") == 200:
             self._start_countdown()
         else:
@@ -122,6 +132,29 @@ class SmsDialog(QDialog):
             QMessageBox.warning(self, "发送失败", msg)
             # 即使失败也启动倒计时（防止频繁请求）
             self._start_countdown()
+
+    def _run_geetest(self):
+        """弹出 GeeTest 验证窗口，返回验证 JSON 字符串（失败/取消返回 None）。"""
+        try:
+            from ui.geetest_dialog import GeeTestDialog, WEBENGINE_AVAILABLE
+        except Exception as e:
+            QMessageBox.warning(self, "验证", f"验证码组件加载失败：{e}")
+            return None
+        if not WEBENGINE_AVAILABLE:
+            QMessageBox.warning(
+                self, "验证",
+                "当前环境缺少浏览器组件（QtWebEngine），无法显示验证码。\n"
+                "请换一台能正常显示的 Windows 电脑重试。",
+            )
+            return None
+        dlg = GeeTestDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        res = dlg.get_validate_result()
+        if not res:
+            return None
+        import json
+        return json.dumps(res, ensure_ascii=False)
 
     def _start_countdown(self):
         self._remaining = self.COUNTDOWN_SECONDS
