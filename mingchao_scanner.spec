@@ -101,7 +101,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="鸣潮抢码器-v3.1.0",
+    name="WutheringWaves-Scanner-v3.1.0",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
