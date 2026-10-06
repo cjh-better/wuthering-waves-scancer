@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """二维码扫描器 - 增强版（支持图像预处理和多次识别）"""
 from PIL import ImageGrab, Image, ImageEnhance
-from pyzbar.pyzbar import decode
 from typing import Optional, List, Protocol, runtime_checkable
 import ctypes
 import numpy as np
@@ -11,6 +10,23 @@ from utils.log import get_logger
 
 
 logger = get_logger("QR")
+
+# pyzbar 为可选依赖：缺失时 decode 返回空列表（与 ai_qr_scanner 一致）
+try:
+    from pyzbar.pyzbar import decode as _pyzbar_decode
+except ImportError:
+    _pyzbar_decode = None
+    logger.warning("[QR] pyzbar 不可用，pyzbar 解码路径禁用")
+
+
+def _safe_pyzbar_decode(img):
+    """pyzbar 解码包装：缺失时返回空列表，永不抛异常。"""
+    if _pyzbar_decode is None:
+        return []
+    try:
+        return _pyzbar_decode(img)
+    except Exception:
+        return []
 
 
 @runtime_checkable
@@ -160,7 +176,7 @@ class QRScanner:
         尝试解码单张图片的QR码
         """
         try:
-            decoded_objects = decode(img)
+            decoded_objects = _safe_pyzbar_decode(img)
             if decoded_objects:
                 for obj in decoded_objects:
                     qr_data = normalise_qr_text(obj.data)
