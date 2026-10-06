@@ -18,6 +18,10 @@ from utils.config_manager import config_manager
 from utils.account_manager import account_manager
 from utils.kuro_api import KuroAPI, kuro_api
 from utils.qr_payload import extract_kuro_ticket
+from utils.log import get_logger
+
+
+logger = get_logger("MainWindow")
 
 # 性能监控（可选）
 try:
@@ -746,7 +750,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         except Exception as e:
-            print(f"[Config] Failed to load saved config: {e}")
+            logger.warning(f"[Config] Failed to load saved config: {e}")
 
     # ==================================================================
     # #4 — 启动时自动扫描

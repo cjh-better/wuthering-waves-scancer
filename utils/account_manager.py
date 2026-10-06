@@ -9,6 +9,10 @@ import threading
 from typing import List, Optional, Dict, Any
 
 from utils.secure_token_store import protect_token, unprotect_token
+from utils.log import get_logger
+
+
+logger = get_logger("AccountManager")
 
 
 class AccountManager:
@@ -48,7 +52,7 @@ class AccountManager:
                     self._sync()
                     return
             except Exception as e:
-                print(f"[AccountManager] Failed to load accounts: {e}")
+                logger.warning(f"[AccountManager] Failed to load accounts: {e}")
         self._accounts = []
 
     def _sync(self):
@@ -60,7 +64,7 @@ class AccountManager:
             with open(self.ACCOUNTS_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._accounts, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"[AccountManager] Failed to save accounts: {e}")
+            logger.warning(f"[AccountManager] Failed to save accounts: {e}")
 
     @staticmethod
     def _normalise_account(acc: Dict[str, Any]) -> Dict[str, str]:

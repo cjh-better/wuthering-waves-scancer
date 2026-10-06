@@ -4,11 +4,16 @@ Windows BitBlt快速截图（参考MHY_Scanner）
 比PIL.ImageGrab快5-10倍
 """
 import numpy as np
+import threading
 from PIL import Image
 import win32gui
 import win32ui
 import win32con
 import win32api
+from utils.log import get_logger
+
+
+logger = get_logger("FastScreenshot")
 
 
 class FastScreenshot:
@@ -45,7 +50,7 @@ class FastScreenshot:
             dpi = win32ui.CreateDCFromHandle(hdc).GetDeviceCaps(88)  # LOGPIXELSX
             win32gui.ReleaseDC(0, hdc)
             return dpi / 96.0  # 96 DPI = 100% 缩放
-        except:
+        except Exception:
             return 1.0
     
     def grab_screen(self):
@@ -125,23 +130,27 @@ class FastScreenshot:
             self.saveDC.DeleteDC()
             self.mfcDC.DeleteDC()
             win32gui.ReleaseDC(0, self.hwndDC)
-        except:
+        except Exception:
             pass
 
 
 # 全局单例（避免重复创建）
 _fast_screenshot = None
+_fast_screenshot_lock = threading.Lock()
+
 
 def get_fast_screenshot():
-    """获取快速截图工具单例"""
+    """获取快速截图工具单例（线程安全）"""
     global _fast_screenshot
     if _fast_screenshot is None:
-        try:
-            _fast_screenshot = FastScreenshot()
-            print("[FastScreenshot] BitBlt快速截图已启用（比PIL快5-10倍）")
-        except Exception as e:
-            print(f"[FastScreenshot] 初始化失败，将使用PIL: {e}")
-            _fast_screenshot = None
+        with _fast_screenshot_lock:
+            if _fast_screenshot is None:
+                try:
+                    _fast_screenshot = FastScreenshot()
+                    logger.info("[FastScreenshot] BitBlt快速截图已启用（比PIL快5-10倍）")
+                except Exception as e:
+                    logger.warning(f"[FastScreenshot] 初始化失败，将使用PIL: {e}")
+                    _fast_screenshot = None
     return _fast_screenshot
 
 

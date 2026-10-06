@@ -5,13 +5,17 @@ from PySide6.QtWidgets import QWidget, QLabel, QApplication
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor
 
 from utils.qr_payload import extract_kuro_ticket
+from utils.log import get_logger
+
+
+logger = get_logger("ScanWindow")
 
 # 尝试导入AI扫描器，如果失败则使用普通扫描器
 try:
     from utils.ai_qr_scanner import ai_qr_scanner as qr_scanner
-    print("[AI] Using AI-enhanced scanner")
+    logger.info("[AI] Using AI-enhanced scanner")
 except Exception as e:
-    print(f"[Warning] AI scanner failed to load, using standard scanner: {e}")
+    logger.warning(f"[Warning] AI scanner failed to load, using standard scanner: {e}")
     from utils.qr_scanner import qr_scanner
 
 
@@ -189,7 +193,7 @@ class ScanWindow(QWidget):
                     return
 
                 self.last_ticket = ticket
-                print(f"[QR] ✓ New QR detected: {ticket[:8]}...")
+                logger.info(f"[QR] ✓ New QR detected: {ticket[:8]}...")
             
             # 🚀 立即发送信号并停止扫描
             self.last_qr_code = qr_code

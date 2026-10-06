@@ -558,7 +558,8 @@ class TestBilibiliStreamInfo:
         mock_resp.status_code = 200
         mock_resp.text = json.dumps({"code": 60004})
 
-        with patch("requests.get", return_value=mock_resp):
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.return_value = mock_resp
             info = scanner._get_bilibili_stream_info("999999")
 
         assert info.status == LiveStreamStatus.Absent
@@ -572,7 +573,8 @@ class TestBilibiliStreamInfo:
             "data": {"live_status": 0, "room_id": 12345},
         })
 
-        with patch("requests.get", return_value=mock_resp):
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.return_value = mock_resp
             info = scanner._get_bilibili_stream_info("12345")
 
         assert info.status == LiveStreamStatus.NotLive
@@ -583,7 +585,8 @@ class TestBilibiliStreamInfo:
         mock_resp.status_code = 500
         mock_resp.text = "Internal Server Error"
 
-        with patch("requests.get", return_value=mock_resp):
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.return_value = mock_resp
             info = scanner._get_bilibili_stream_info("12345")
 
         assert info.status == LiveStreamStatus.Error
@@ -594,7 +597,8 @@ class TestBilibiliStreamInfo:
         mock_resp.status_code = 200
         mock_resp.text = "<html>not json</html>"
 
-        with patch("requests.get", return_value=mock_resp):
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.return_value = mock_resp
             info = scanner._get_bilibili_stream_info("12345")
 
         assert info.status == LiveStreamStatus.Error
