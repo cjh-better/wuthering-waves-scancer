@@ -2,7 +2,7 @@
 """登录对话框"""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout,
+    QDialog, QVBoxLayout,
     QLabel, QLineEdit, QPushButton, QMessageBox,
     QWidget
 )

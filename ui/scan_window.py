@@ -2,9 +2,9 @@
 """扫描窗口 - AI增强版"""
 import threading
 
-from PySide6.QtCore import Qt, QTimer, Signal, QRect, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtWidgets import QWidget, QLabel, QApplication
-from PySide6.QtGui import QPainter, QPen, QColor, QCursor
+from PySide6.QtGui import QPainter, QPen, QColor
 
 from utils.qr_payload import extract_kuro_ticket
 from utils.log import get_logger

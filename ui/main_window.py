@@ -6,7 +6,7 @@ import platform
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QTextEdit, QMessageBox, QInputDialog, QLineEdit,
+    QLabel, QPushButton, QTextEdit, QMessageBox, QLineEdit,
     QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QComboBox, QMenu, QAbstractItemView,
 )

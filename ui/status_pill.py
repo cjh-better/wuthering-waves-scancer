@@ -7,8 +7,7 @@
 - 登录中：金色圆点 + 呼吸脉冲
 """
 from PySide6.QtWidgets import QWidget, QLabel, QHBoxLayout
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, Property
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPropertyAnimation, QEasingCurve, Property
 
 
 class StatusPill(QWidget):
