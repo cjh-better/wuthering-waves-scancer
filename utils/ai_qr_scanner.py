@@ -717,13 +717,17 @@ class AIQRScanner:
         # 或抛异常时，不能把调用线程（扫描线程）一起拖死。
         # 优化3：超时按图像尺寸自适应——1080p 基准 10s，4K 给 15s，
         # 小图 5s。避免大图超时误杀、小图空等。
+        # P4优化：单候选是默认路径，直接用固定超时跳过像素计算
         try:
-            max_pixels = 0
-            for _, img in images:
-                if hasattr(img, "shape") and len(img.shape) >= 2:
-                    max_pixels = max(max_pixels, img.shape[0] * img.shape[1])
-            # 1080p=2M像素→10s，线性缩放，夹在 5s~15s
-            timeout_s = min(15.0, max(5.0, 10.0 * max_pixels / 2073600)) if max_pixels else _PARALLEL_DECODE_TIMEOUT_S
+            if len(images) == 1:
+                timeout_s = 10.0
+            else:
+                max_pixels = 0
+                for _, img in images:
+                    if hasattr(img, "shape") and len(img.shape) >= 2:
+                        max_pixels = max(max_pixels, img.shape[0] * img.shape[1])
+                # 1080p=2M像素→10s，线性缩放，夹在 5s~15s
+                timeout_s = min(15.0, max(5.0, 10.0 * max_pixels / 2073600)) if max_pixels else _PARALLEL_DECODE_TIMEOUT_S
         except Exception:
             timeout_s = _PARALLEL_DECODE_TIMEOUT_S
         try:
