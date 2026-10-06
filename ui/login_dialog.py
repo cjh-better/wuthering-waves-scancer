@@ -92,7 +92,7 @@ class LoginDialog(QDialog):
         layout.addSpacing(15)
         
         # 主按钮
-        self.main_btn = QPushButton("下一步")
+        self.main_btn = QPushButton("获取验证码")
         self.main_btn.setFixedHeight(50)
         self.main_btn.clicked.connect(self.on_main_btn_click)
         layout.addWidget(self.main_btn)
@@ -124,7 +124,7 @@ class LoginDialog(QDialog):
     def on_main_btn_click(self):
         """主按钮点击"""
         if self.step == 1:
-            # 第一步：验证手机号并打开官网
+            # 第一步：验证手机号，直接调 API 发送验证码（借鉴 kuro.py 思路）
             import re
             phone = self.phone_input.text().strip()
 
@@ -138,41 +138,35 @@ class LoginDialog(QDialog):
                 self.phone_input.setFocus()
                 self.phone_input.selectAll()
                 return
-            
+
             self.phone_number = phone
-            
-            # 打开官网
-            import webbrowser
-            webbrowser.open("https://www.kurobbs.com")
-            
-            # 显示详细提示
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("获取验证码")
-            msg_box.setIcon(QMessageBox.Information)
-            msg_box.setText(
-                f"已在浏览器打开库街区官网\n\n"
-                f"手机号：{phone}\n\n"
-                f"⚠️ 重要提示 ⚠️\n\n"
-                f"1. 在网页中输入手机号：{phone}\n"
-                f"2. 点击【获取验证码】\n"
-                f"3. 收到验证码后【直接复制】\n"
-                f"4. 回到本程序，点击确定后粘贴验证码\n\n"
-                f"⚠️ 请勿在网页上输入验证码！\n"
-                f"   否则验证码将失效！"
-            )
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            msg_box.exec()
-            
-            # 切换到第二步
-            self.step = 2
-            self.title.setText("输入验证码")
-            self.subtitle.setText(f"验证码已发送至 {phone[:3]}****{phone[-4:]}")
-            self.phone_container.hide()
-            self.code_container.show()
-            self.main_btn.setText("登录")
-            self.back_btn.show()
-            self.code_input.setFocus()
-            
+
+            # 禁用按钮防重复点击
+            self.main_btn.setEnabled(False)
+            self.main_btn.setText("发送中...")
+
+            try:
+                from utils.kuro_api import kuro_api
+                result = kuro_api.send_sms_code(phone)
+            finally:
+                self.main_btn.setEnabled(True)
+                self.main_btn.setText("获取验证码")
+
+            if result.get("code") == 200 and not result.get("need_geetest"):
+                # API 发送成功，直接进第二步
+                self._goto_step2(phone)
+                return
+
+            if result.get("need_geetest"):
+                # 触发极验：弹滑块验证，通过后重试
+                if self._solve_geetest_and_retry(phone):
+                    return
+                # 滑块失败/取消 → 降级走浏览器
+            else:
+                self._log_sms_fallback(result.get("msg", "发送失败"))
+
+            # 降级：打开官网手动获取（原流程保留）
+            self._fallback_to_browser(phone)
         else:
             # 第二步：执行登录
             code = self.code_input.text().strip()
@@ -201,6 +195,70 @@ class LoginDialog(QDialog):
                 self.main_btn.setEnabled(True)
                 self.main_btn.setText("登录")
                 self.back_btn.setEnabled(True)
+
+    def _goto_step2(self, phone: str):
+        """切换到第二步：输入验证码"""
+        self.step = 2
+        self.title.setText("输入验证码")
+        self.subtitle.setText(f"验证码已发送至 {phone[:3]}****{phone[-4:]}")
+        self.phone_container.hide()
+        self.code_container.show()
+        self.main_btn.setText("登录")
+        self.back_btn.show()
+        self.code_input.setFocus()
+
+    def _solve_geetest_and_retry(self, phone: str) -> bool:
+        """极验滑块验证，通过后重试发送短信。成功返回 True。"""
+        try:
+            from ui.geetest_dialog import GeeTestDialog
+        except Exception:
+            return False
+        dlg = GeeTestDialog(self)
+        if dlg.exec() != dlg.Accepted:
+            return False
+        validate = dlg.get_validate_result() or {}
+        import json
+        geetest_data = json.dumps(validate) if validate else ""
+        if not geetest_data:
+            return False
+        from utils.kuro_api import kuro_api
+        result = kuro_api.send_sms_code(phone, geetest_data=geetest_data)
+        if result.get("code") == 200 and not result.get("need_geetest"):
+            self._goto_step2(phone)
+            return True
+        return False
+
+    def _log_sms_fallback(self, reason: str):
+        """记录 API 发送失败原因（调试用）。"""
+        try:
+            from utils.logger import get_logger
+            get_logger("LoginDialog").warning(f"[Login] API发短信失败({reason})，降级走浏览器")
+        except Exception:
+            pass
+
+    def _fallback_to_browser(self, phone: str):
+        """降级方案：打开官网手动获取验证码（原流程）。"""
+        import webbrowser
+        webbrowser.open("https://www.kurobbs.com")
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("获取验证码")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setText(
+            f"已在浏览器打开库街区官网\n\n"
+            f"手机号：{phone}\n\n"
+            f"1. 在网页中输入手机号：{phone}\n"
+            f"2. 点击【获取验证码】\n"
+            f"3. 收到验证码后【直接复制】\n"
+            f"4. 回到本程序，点击确定后粘贴验证码\n\n"
+            f"⚠️ 请勿在网页上输入验证码！\n"
+            f"   否则验证码将失效！"
+        )
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec()
+
+        self._goto_step2(phone)
+
     
     def on_back(self):
         """返回上一步"""
@@ -209,7 +267,7 @@ class LoginDialog(QDialog):
         self.subtitle.setText("请输入手机号码")
         self.code_container.hide()
         self.phone_container.show()
-        self.main_btn.setText("下一步")
+        self.main_btn.setText("获取验证码")
         self.back_btn.hide()
         self.code_input.clear()
         self.phone_input.setFocus()

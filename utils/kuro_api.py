@@ -240,6 +240,45 @@ class KuroAPI:
                 self._warming = False
         _th.Thread(target=_do, daemon=True).start()
     
+    def send_sms_code(self, mobile: str, geetest_data: str = "") -> Dict[str, Any]:
+        """
+        直接调用 API 发送短信验证码（无需跳浏览器去官网手动获取）。
+
+        参考开源项目 wuthery/kuro.py 的思路：POST /user/getSmsCodeForH5，
+        参数 mobile + geeTestData（极验触发时需先过滑块再重试）。
+
+        Args:
+            mobile: 手机号
+            geetest_data: 极验验证通过后的结果 JSON（首次调用传空）
+
+        Returns:
+            统一返回 {"code": 200/-1, "msg": ..., "need_geetest": bool}
+            need_geetest=True 表示触发了极验，需用户过滑块后带 geetest_data 重试
+        """
+        url = f"{self.BASE_URL}/user/getSmsCodeForH5"
+        data = {
+            "mobile": mobile,
+            "geeTestData": geetest_data,
+        }
+
+        try:
+            response = self.session.post(url, data=data, headers=self.headers, timeout=10)
+            result = response.json()
+
+            # 兼容两种返回格式：{code: 200} 与 {success: true}
+            ok = result.get("code") == 200 or result.get("success") is True
+            if ok:
+                # 检查是否触发极验
+                need_gt = bool(result.get("data", {}).get("geeTest"))
+                if need_gt:
+                    return {"code": 200, "msg": "需要极验验证", "need_geetest": True}
+                return {"code": 200, "msg": "验证码已发送", "need_geetest": False}
+
+            msg = result.get("msg", "发送失败")
+            return {"code": -1, "msg": msg, "need_geetest": False}
+        except Exception as e:
+            return {"code": -1, "msg": f"请求失败: {str(e)}", "need_geetest": False}
+
     def login(self, mobile: str, code: str) -> Dict[str, Any]:
         """
         使用手机号和验证码登录
