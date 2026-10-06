@@ -3,6 +3,7 @@
 import os
 import sys
 import platform
+from datetime import datetime
 from PySide6.QtCore import Qt, QTimer, Signal, QThread
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -1572,7 +1573,7 @@ class MainWindow(QMainWindow):
                 pass
 
     def add_log(self, message):
-        from datetime import datetime
+        # U2优化：datetime 提顶层，避免高频调用重复 import
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.append(f"[{timestamp}] {message}")
         # 优化61：上限 1000 行，超了删旧的（防长时运行卡顿）

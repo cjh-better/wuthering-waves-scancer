@@ -66,11 +66,16 @@ class AIQRScanner:
 
         # P1优化：decode_subprocess_isolation 是启动时开关，缓存避免
         # 热路径每帧查 config（import + 字典查询）
+        # P3优化：屏幕扫描的 downscale/candidates 同理缓存
         try:
             from utils.config_manager import config_manager as _cm
             self._subprocess_isolation = bool(_cm.get("decode_subprocess_isolation", False))
+            self._screen_downscale = float(_cm.get("screen_capture_downscale", 1.0))
+            self._screen_candidates = int(_cm.get("screen_scan_candidates", 1))
         except Exception:
             self._subprocess_isolation = False
+            self._screen_downscale = 1.0
+            self._screen_candidates = 1
         
         # 加载AI模型
         self.sr_net = None  # 超分辨率网络
@@ -839,9 +844,9 @@ class AIQRScanner:
                 # 截图降采样（4K屏）：screen_capture_downscale<1.0 时先缩小，
                 # 省后续 resize+解码时间。默认 1.0（不降采样）。
                 # buffer 复用：dst 写入池化 buffer，省一次分配
-                from utils.config_manager import config_manager as _cm2
+                # P3：用缓存的配置值，避免热路径查 config
                 from utils.ndarray_pool import ndarray_pool as _pool
-                _downscale = _cm2.get("screen_capture_downscale", 1.0)
+                _downscale = self._screen_downscale
                 if _downscale < 1.0 and _downscale > 0.1:
                     _dh, _dw = img_arr.shape[:2]
                     _nw, _nh = max(1, int(_dw * _downscale)), max(1, int(_dh * _downscale))
@@ -857,8 +862,8 @@ class AIQRScanner:
                 # 单候选（默认）：benchmark 证明 WeChatQR@0.4 单遍 120-650px
                 # 全 3/3 检出，三候选的边际收益抵不过 3 倍串行耗时。
                 # 可通过 screen_scan_candidates=3 切回三候选。
-                from utils.config_manager import config_manager as _cm
-                _n_candidates = _cm.get("screen_scan_candidates", 1)
+                # P3：用缓存的配置值
+                _n_candidates = self._screen_candidates
                 if _n_candidates == 1:
                     candidates = [("original", img_arr)]
                 else:
