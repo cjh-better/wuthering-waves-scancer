@@ -207,7 +207,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("鸣潮抢码器 v3.0 - Release")
-        self.setFixedSize(680, 1150)
+        # 窗口可自由调整：默认横向长方形，最小尺寸保底
+        self.resize(1120, 760)
+        self.setMinimumSize(880, 620)
         # 优化65：恢复上次窗口位置
         try:
             from utils.config_manager import config_manager as _cm_geo
@@ -273,10 +275,12 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(14)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # 标题：主标题 + 副标题，营造品牌感
+        # 标题栏：左标题 + 右主题切换按钮
+        title_bar = QHBoxLayout()
+        title_bar.setContentsMargins(4, 4, 4, 8)
+
         title_wrap = QVBoxLayout()
         title_wrap.setSpacing(2)
-        title_wrap.setContentsMargins(4, 4, 4, 8)
         title = QLabel("鸣潮抢码器")
         title.setObjectName("appTitle")
         title.setAlignment(Qt.AlignCenter)
@@ -285,7 +289,20 @@ class MainWindow(QMainWindow):
         subtitle.setAlignment(Qt.AlignCenter)
         title_wrap.addWidget(title)
         title_wrap.addWidget(subtitle)
-        main_layout.addLayout(title_wrap)
+
+        title_bar.addStretch(1)
+        title_bar.addLayout(title_wrap)
+        title_bar.addStretch(1)
+
+        # 主题切换按钮（右上角）
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("themeBtn")
+        self.theme_btn.setCursor(Qt.PointingHandCursor)
+        self.theme_btn.setToolTip("切换浅色 / 深色主题")
+        self.theme_btn.clicked.connect(self.on_toggle_theme)
+        title_bar.addWidget(self.theme_btn, alignment=Qt.AlignTop)
+
+        main_layout.addLayout(title_bar)
 
         self._setup_account_section(main_layout)
         self._setup_control_section(main_layout)
@@ -308,21 +325,9 @@ class MainWindow(QMainWindow):
             pass
 
     def _section_header(self, text: str) -> QWidget:
-        """分区标题：简洁文本，左侧金色边框线。"""
+        """分区标题：简洁文本，左侧金色边框线（样式由主题表 QLabel#sectionTitle 提供）。"""
         label = QLabel(f"  {text}")
         label.setObjectName("sectionTitle")
-        # 左侧金色边框用样式表实现
-        label.setStyleSheet("""
-            QLabel#sectionTitle {
-                font-size: 14px;
-                font-weight: 600;
-                color: #EDEFF5;
-                letter-spacing: 1px;
-                border-left: 4px solid #C9A86A;
-                padding-left: 10px;
-                margin: 4px 2px 8px 2px;
-            }
-        """)
         return label
 
     def _animate_entrance(self, widget, delay_ms: int = 0) -> None:
@@ -770,7 +775,7 @@ class MainWindow(QMainWindow):
         preset_layout = QHBoxLayout()
         preset_layout.setSpacing(10)
         preset_label = QLabel("速度模式")
-        preset_label.setStyleSheet("color: #9AA4B8; font-size: 12.5px;")
+        preset_label.setObjectName("presetLabel")
         preset_layout.addWidget(preset_label)
         from utils.speed_presets import PRESETS, PRESET_ORDER, current_preset, apply_preset
         self.preset_combo = QComboBox()
@@ -885,8 +890,33 @@ class MainWindow(QMainWindow):
     # ==================================================================
 
     def apply_styles(self):
-        from ui.theme import STYLESHEET
-        self.setStyleSheet(STYLESHEET)
+        """应用当前主题样式表（从配置读取主题，默认深色）。"""
+        from ui.theme import get_stylesheet, THEME_DARK
+        theme = config_manager.get("theme", THEME_DARK)
+        self._current_theme = theme
+        self.setStyleSheet(get_stylesheet(theme))
+        self._refresh_theme_btn()
+
+    def _refresh_theme_btn(self):
+        """刷新主题切换按钮的文字（🌙 深色 / ☀️ 浅色）。"""
+        from ui.theme import THEME_LIGHT
+        if not hasattr(self, "theme_btn"):
+            return
+        if getattr(self, "_current_theme", "dark") == THEME_LIGHT:
+            self.theme_btn.setText("🌙 深色")
+        else:
+            self.theme_btn.setText("☀️ 浅色")
+
+    def on_toggle_theme(self):
+        """切换浅色 / 深色主题，立即生效并保存偏好。"""
+        from ui.theme import get_stylesheet, THEME_DARK, THEME_LIGHT
+        cur = getattr(self, "_current_theme", THEME_DARK)
+        new_theme = THEME_LIGHT if cur == THEME_DARK else THEME_DARK
+        self._current_theme = new_theme
+        config_manager.set("theme", new_theme)
+        self.setStyleSheet(get_stylesheet(new_theme))
+        self._refresh_theme_btn()
+        self.add_log(f"已切换为{'浅色' if new_theme == THEME_LIGHT else '深色'}主题")
 
     # ==================================================================
     # Account Actions
