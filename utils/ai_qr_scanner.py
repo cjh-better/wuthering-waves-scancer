@@ -18,6 +18,7 @@ import ctypes
 import numpy as np
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from utils.qr_payload import is_kuro_qr, normalise_qr_text
@@ -62,6 +63,14 @@ class AIQRScanner:
             self.scale_factor = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100
         except Exception:
             self.scale_factor = 1.0
+
+        # P1优化：decode_subprocess_isolation 是启动时开关，缓存避免
+        # 热路径每帧查 config（import + 字典查询）
+        try:
+            from utils.config_manager import config_manager as _cm
+            self._subprocess_isolation = bool(_cm.get("decode_subprocess_isolation", False))
+        except Exception:
+            self._subprocess_isolation = False
         
         # 加载AI模型
         self.sr_net = None  # 超分辨率网络
@@ -479,31 +488,25 @@ class AIQRScanner:
         allow_slow_fallback: bool = True,
     ) -> Optional[str]:
         # 优化81：p99 延迟统计（包装内层逻辑）
-        import time as _t
-        _start = _t.time()
+        # P2优化：合并两次加锁为一次；time/numpy 提到外层避免重复 import
+        _start = time.time()
         try:
             result = self._try_decode_array_inner(img_array, color, allow_slow_fallback)
-            # 优化84：命中计数
-            if result:
-                try:
-                    with self._decode_lock:
-                        self._decode_hit += 1
-                except Exception:
-                    pass
             return result
         finally:
-            _elapsed_ms = (_t.time() - _start) * 1000
+            _elapsed_ms = (time.time() - _start) * 1000
             try:
                 with self._decode_lock:
                     self._decode_count += 1
+                    if result:
+                        self._decode_hit += 1
                     self._decode_times.append(_elapsed_ms)
                     if len(self._decode_times) > 100:
                         self._decode_times.pop(0)
                     # 优化82：每 100 次采样一次统计（避免刷屏）
                     if self._decode_count % 100 == 0:
-                        import numpy as _np
-                        arr = _np.array(self._decode_times)
-                        p99 = float(_np.percentile(arr, 99))
+                        arr = np.array(self._decode_times)
+                        p99 = float(np.percentile(arr, 99))
                         hit_rate = self._decode_hit / max(1, self._decode_count)
                         logger.info(
                             "[Decode] 100次统计: p99=%.0fms 命中率=%.1f%%",
@@ -532,12 +535,12 @@ class AIQRScanner:
         self._ensure_models()
         # 子进程隔离（可选）：native segfault 只死 worker，主进程不受影响。
         # 默认关闭（thread-local 已解决已知并发 crash），极端 robustness 需求时开启。
-        try:
-            from utils.config_manager import config_manager as _cm_iso
-            if _cm_iso.get("decode_subprocess_isolation", False):
+        # P1：用 __init__ 缓存的开关，避免热路径查 config
+        if self._subprocess_isolation:
+            try:
                 return self._try_decode_isolated(img_array, color)
-        except Exception:
-            pass
+            except Exception:
+                pass
         try:
             if img_array is None:
                 return None

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """库街区 API 封装 - 终极网络优化版"""
+import re
 import requests
 import socket
+import time
+import uuid
 from typing import Dict, Optional, Any
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -9,6 +12,9 @@ from utils.log import get_logger
 
 
 logger = get_logger("Network")
+
+# N3优化：URL 脱敏正则预编译（避免每次慢请求重新编译）
+_URL_SENSITIVE_RE = re.compile(r"(token|ticket|qrCode)=[^&]*")
 
 # 尝试导入 HTTP/2 支持
 try:
@@ -30,18 +36,16 @@ class KuroAPI:
         # 优化49：慢请求告警——包装 session.request，>3s 打 warning
         _orig_request = self.session.request
         def _timed_request(method, url, **kwargs):
-            import time as _t
-            start = _t.time()
+            start = time.time()
             try:
                 return _orig_request(method, url, **kwargs)
             finally:
-                elapsed = _t.time() - start
+                elapsed = time.time() - start
                 if elapsed > 3.0:
                     # 脱敏 URL 中的 token（优化48）
                     safe_url = url
                     try:
-                        import re as _re
-                        safe_url = _re.sub(r"(token|ticket|qrCode)=[^&]*", r"\1=***", url)
+                        safe_url = _URL_SENSITIVE_RE.sub(r"\1=***", url)
                     except Exception:
                         pass
                     logger.warning("[HTTP] 慢请求 %.1fs %s %s", elapsed, method, safe_url)
@@ -161,20 +165,29 @@ class KuroAPI:
             threading.Thread(target=_resolve, daemon=True).start()
         except Exception:
             pass
-    
-    @staticmethod
-    def _load_timeout_ladder(key: str, default: list) -> list:
+
+    # N2优化：超时阶梯缓存（配置极少变更，避免每次登录重复解析）
+    _ladder_cache: dict = {}
+
+    def _load_timeout_ladder(self, key: str, default: list) -> list:
         """从配置加载超时阶梯，校验为正数列表（防配错导致无限等待）。"""
+        # 先查缓存
+        if key in self._ladder_cache:
+            return self._ladder_cache[key]
         try:
             from utils.config_manager import config_manager
             raw = config_manager.get(key, default)
             ladder = [float(x) for x in raw]
             ladder = [x for x in ladder if x > 0]
             if ladder:
-                return ladder[:5]  # 上限 5 阶，防误配超长
+                result = ladder[:5]  # 上限 5 阶，防误配超长
+                self._ladder_cache[key] = result
+                return result
         except Exception:
             pass
-        return list(default)
+        result = list(default)
+        self._ladder_cache[key] = result
+        return result
 
     def measure_network_latency(self) -> float:
         """
@@ -197,9 +210,11 @@ class KuroAPI:
         """设置认证 token"""
         self.token = token
         self.headers["token"] = token
-        # 设置token后立即预热连接
+        # N1修复：预热是网络 IO（最长 300ms），不能在 UI 线程同步做；
+        # 改后台线程异步预热
         if not self._connection_warmed:
-            self.warm_up_connection()
+            import threading as _th
+            _th.Thread(target=self.warm_up_connection, daemon=True).start()
     
     def warm_up_connection(self) -> None:
         """
@@ -334,9 +349,9 @@ class KuroAPI:
         # H1修复：verify_code 纳入 key——短信验证重试时验证码变化，
         # 若 key 不变且服务端处理该头，会返回缓存的"需要验证码"
         # 响应导致死循环；服务端忽略该头时行为零变化。
-        import uuid as _uuid
-        idem_key = str(_uuid.uuid5(
-            _uuid.NAMESPACE_URL, f"{qr_code}|{verify_code}"))
+        # N4：uuid 提顶层
+        idem_key = str(uuid.uuid5(
+            uuid.NAMESPACE_URL, f"{qr_code}|{verify_code}"))
         data = {
             "autoLogin": "true" if auto_login else "false",
             "qrCode": qr_code,

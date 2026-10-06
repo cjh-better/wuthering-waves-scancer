@@ -1347,8 +1347,8 @@ class MainWindow(QMainWindow):
         ScanThread。UI 更新仍走 on_qr_detected（signal），但登录已在途。
         非 auto_login 时返回，由 on_qr_detected 弹确认框。
         """
-        from utils.config_manager import config_manager as _cm
-        if not _cm.get("auto_login", False):
+        # U1优化：config_manager 已在模块顶层导入，避免热路径重复 import
+        if not config_manager.get("auto_login", False):
             return
         with self._login_lock:
             if self.login_in_progress:
