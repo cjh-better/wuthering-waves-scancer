@@ -168,18 +168,37 @@ class ScanWindow(QWidget):
         self.hint_label.setText("将此框对准二维码\n右键关闭")
     
     def scan_qr_code(self):
+        """QTimer 扫描回调（顶层异常隔离）。
+
+        单次扫描的任何 Python 异常都只记日志、跳过本轮，绝不向上传播
+        拖垮 Qt 事件循环。native 崩溃无法在此捕获，靠 main.py 的
+        faulthandler 落盘诊断（见 issue #8）。
+        """
+        try:
+            self._scan_qr_code_inner()
+        except Exception as e:
+            logger.error(f"[Scan] 扫描回调异常(已隔离): {e}")
+            self.consecutive_misses += 1
+            self._adapt_scan_interval_after_miss()
+
+    def _scan_qr_code_inner(self):
         """🚀 扫描二维码 - 持续扫描模式"""
         # If processing QR code, skip this scan
         if self.processing_qr:
             self._set_scan_interval(self.processing_scan_interval)
             return
-            
+
         # Get window position and size
         geometry = self.geometry()
         x = geometry.x()
         y = geometry.y()
         width = geometry.width()
         height = geometry.height()
+
+        # 守卫：窗口最小化/0 尺寸时跳过（空图是 native 解码器的崩溃高发区）
+        if width <= 0 or height <= 0:
+            logger.warning(f"[Scan] 扫描窗口尺寸非法({width}x{height})，跳过")
+            return
         
         # 🚀 扫描区域（每次都尝试识别）
         qr_code = qr_scanner.scan_region(x, y, width, height)

@@ -61,6 +61,8 @@ class LiveStreamInfo:
     status: LiveStreamStatus
     url: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
+    detail: str = ""  # human-readable failure reason, shown to the user
+                      # (e.g. "HTTP 403", "接口返回空响应(疑似被风控)")
 
 
 # FFmpeg low-latency options applied when opening a stream.
@@ -110,6 +112,16 @@ _DOUYIN_API_PARAMS = (
 )
 _BILIBILI_API_TIMEOUT = 5
 _DOUYIN_API_TIMEOUT = 10
+
+# Douyin HTML fallback channel (used when the web/enter JSON API returns
+# HTTP 200 with an empty body – suspected wind-control).
+_DOUYIN_ROOM_PAGE_URL = "https://live.douyin.com/%s"
+_DOUYIN_HTML_TIMEOUT = 10
+# Bytes scanned after a "stream_url" key when extracting the stream URL
+# from the (escaped) embedded JSON of the room HTML page.
+_HTML_STREAM_LOOKAHEAD = 65536
+# Length of the response-body preview written to the diagnostics log.
+_DIAG_PREVIEW_LEN = 200
 
 # Decode pipeline tuning
 _MAX_SCAN_STRIDE = 30          # hard ceiling for the adaptive stride
@@ -271,21 +283,37 @@ class LiveStreamScanner(QThread):
                 timeout=_BILIBILI_API_TIMEOUT,
             )
             if r.status_code != 200:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+                self._diag_response("Bilibili/room_init", r)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="网络请求失败(HTTP %s)" % r.status_code,
+                )
 
             room_info = self._safe_json(r.text)
             if room_info is None:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+                self._diag_response("Bilibili/room_init", r)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="接口返回空响应或非法JSON",
+                )
 
             code = room_info.get("code")
             if code == 60004:
-                return LiveStreamInfo(status=LiveStreamStatus.Absent)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.Absent, detail="房间不存在"
+                )
             if code != 0:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+                self._diag_response("Bilibili/room_init", r)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="接口报错(code=%s)" % code,
+                )
 
             live_status = room_info["data"]["live_status"]
             if live_status != 1:
-                return LiveStreamInfo(status=LiveStreamStatus.NotLive)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.NotLive, detail="主播未开播"
+                )
 
             real_room_id = room_info["data"]["room_id"]
 
@@ -303,15 +331,27 @@ class LiveStreamScanner(QThread):
                 _BILIBILI_PLAY_INFO_URL, params=params, timeout=_BILIBILI_API_TIMEOUT
             )
             if r.status_code != 200:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+                self._diag_response("Bilibili/play_info", r)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="网络请求失败(HTTP %s)" % r.status_code,
+                )
 
             play_info = self._safe_json(r.text)
             if play_info is None:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+                self._diag_response("Bilibili/play_info", r)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="接口返回空响应或非法JSON",
+                )
 
             stream_url = self._parse_bilibili_play_info(play_info)
             if not stream_url:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+                self._diag_response("Bilibili/play_info", r)
+                return LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="解析失败：未找到可用流地址",
+                )
 
             return LiveStreamInfo(
                 status=LiveStreamStatus.Normal,
@@ -320,7 +360,9 @@ class LiveStreamScanner(QThread):
             )
         except Exception as e:
             logger.warning("[LiveStream] Bilibili fetch error: %s", e)
-            return LiveStreamInfo(status=LiveStreamStatus.Error)
+            return LiveStreamInfo(
+                status=LiveStreamStatus.Error, detail="请求异常：%s" % e
+            )
 
     @staticmethod
     def _parse_bilibili_play_info(play_info: dict) -> str:
@@ -361,52 +403,226 @@ class LiveStreamScanner(QThread):
     # -- Douyin ---------------------------------------------------------
 
     def _get_douyin_stream_info(self, room_id: str) -> LiveStreamInfo:
-        """Fetch Douyin stream info.
+        """Fetch Douyin stream info (JSON API with HTML fallback).
 
-        Implements the full Douyin room API with both ``pull_datas`` and
-        ``live_core_sdk_data`` fallback paths, ported from MHY_Scanner's
-        ``LiveDouyin::GetLiveStreamInfo`` + ``GetStreamLinkFromResponse``.
+        The ``web/enter`` JSON API currently returns HTTP 200 with an empty
+        body for many users (suspected wind-control).  When the API channel
+        fails without an authoritative answer, we fall back to parsing the
+        room HTML page, which embeds the same stream data.  No signature
+        reverse engineering is involved – best effort only.
         """
         try:
-            params = "%s&web_rid=%s" % (_DOUYIN_API_PARAMS, room_id)
-            url = "%s?%s" % (_DOUYIN_ROOM_URL, params)
+            info, try_html = self._get_douyin_stream_info_api(room_id)
+            if info.status == LiveStreamStatus.Normal:
+                return info
+            if not try_html:
+                return info
+            logger.info(
+                "[LiveStream] Douyin API channel failed (%s), trying HTML fallback",
+                info.detail,
+            )
+            html_info = self._get_douyin_stream_info_html(room_id)
+            if html_info.status == LiveStreamStatus.Normal:
+                return html_info
+            # Neither channel worked – combine both reasons for the user.
+            combined = info.detail or "未知错误"
+            if html_info.detail:
+                combined = "%s；HTML备用通道：%s" % (combined, html_info.detail)
+            return LiveStreamInfo(status=info.status, detail=combined)
+        except Exception as e:
+            logger.warning("[LiveStream] Douyin fetch error: %s", e)
+            return LiveStreamInfo(
+                status=LiveStreamStatus.Error, detail="请求异常：%s" % e
+            )
 
+    def _get_douyin_stream_info_api(self, room_id: str):
+        """Query the ``web/enter`` JSON API.
+
+        Returns a ``(LiveStreamInfo, try_html_fallback)`` tuple.  The HTML
+        fallback is only worth trying when the API did not give an
+        authoritative answer (HTTP error / empty body / invalid JSON);
+        a valid "room absent / not live" response is final.
+        """
+        params = "%s&web_rid=%s" % (_DOUYIN_API_PARAMS, room_id)
+        url = "%s?%s" % (_DOUYIN_ROOM_URL, params)
+
+        try:
             r = self._session.get(
                 url, headers=_DOUYIN_HEADERS, timeout=_DOUYIN_API_TIMEOUT
             )
-            if r.status_code != 200:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+        except Exception as e:
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="网络请求异常：%s" % e,
+                ),
+                True,
+            )
 
-            info = self._safe_json(r.text)
-            if info is None:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+        if r.status_code != 200:
+            self._diag_response("Douyin/web_enter", r)
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="网络请求失败(HTTP %s)" % r.status_code,
+                ),
+                True,
+            )
 
-            if info.get("status_code") != 0:
-                return LiveStreamInfo(status=LiveStreamStatus.Absent)
+        body = r.text or ""
+        if not body.strip():
+            self._diag_response("Douyin/web_enter", r)
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="接口返回空响应(疑似被风控)",
+                ),
+                True,
+            )
 
-            data_arr = info.get("data", {}).get("data", [])
-            if not data_arr:
-                return LiveStreamInfo(status=LiveStreamStatus.Absent)
+        info = self._safe_json(body)
+        if info is None:
+            self._diag_response("Douyin/web_enter", r)
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="接口返回非法JSON",
+                ),
+                True,
+            )
 
-            room_data = data_arr[0]
-            status = room_data.get("status")
-            if status == 4:
-                return LiveStreamInfo(status=LiveStreamStatus.NotLive)
-            if status != 2:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+        if info.get("status_code") != 0:
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Absent,
+                    detail="房间不存在(接口 status_code=%s)"
+                    % info.get("status_code"),
+                ),
+                False,
+            )
 
-            # Extract FLV URL (try pull_datas first, then live_core_sdk_data)
-            flv_url = self._parse_douyin_stream(room_data)
-            if not flv_url:
-                return LiveStreamInfo(status=LiveStreamStatus.Error)
+        data_arr = info.get("data", {}).get("data", [])
+        if not data_arr:
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Absent,
+                    detail="房间不存在(接口无房间数据)",
+                ),
+                False,
+            )
 
+        room_data = data_arr[0]
+        status = room_data.get("status")
+        if status == 4:
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.NotLive, detail="主播未开播"
+                ),
+                False,
+            )
+        if status != 2:
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="未知的房间状态(status=%s)" % status,
+                ),
+                False,
+            )
+
+        # Extract FLV URL (try pull_datas first, then live_core_sdk_data)
+        flv_url = self._parse_douyin_stream(room_data)
+        if not flv_url:
+            self._diag_response("Douyin/web_enter", r)
+            return (
+                LiveStreamInfo(
+                    status=LiveStreamStatus.Error,
+                    detail="解析失败：接口未返回可用流地址",
+                ),
+                False,
+            )
+
+        return LiveStreamInfo(status=LiveStreamStatus.Normal, url=flv_url), False
+
+    def _get_douyin_stream_info_html(self, room_id: str) -> LiveStreamInfo:
+        """Fallback: fetch the room HTML page and extract the stream URL.
+
+        The page embeds the room JSON with backslash-escaped quotes, so the
+        extraction uses escape-tolerant regexes scoped to the text following
+        a ``stream_url`` key instead of full JSON parsing.
+        """
+        url = _DOUYIN_ROOM_PAGE_URL % room_id
+        try:
+            r = self._session.get(
+                url, headers=_DOUYIN_HEADERS, timeout=_DOUYIN_HTML_TIMEOUT
+            )
+        except Exception as e:
+            return LiveStreamInfo(
+                status=LiveStreamStatus.Error, detail="请求异常：%s" % e
+            )
+
+        self._diag_response("Douyin/room_html", r)
+        if r.status_code != 200:
+            return LiveStreamInfo(
+                status=LiveStreamStatus.Error,
+                detail="页面加载失败(HTTP %s)" % r.status_code,
+            )
+
+        html = r.text or ""
+        if not html.strip():
+            return LiveStreamInfo(
+                status=LiveStreamStatus.Error, detail="页面返回空内容"
+            )
+
+        flv_url = self._extract_flv_from_html(html)
+        if flv_url:
             return LiveStreamInfo(
                 status=LiveStreamStatus.Normal,
                 url=flv_url,
+                detail="经由HTML备用通道获取",
             )
-        except Exception as e:
-            logger.warning("[LiveStream] Douyin fetch error: %s", e)
-            return LiveStreamInfo(status=LiveStreamStatus.Error)
+        return LiveStreamInfo(
+            status=LiveStreamStatus.Error,
+            detail="页面未包含直播流地址(房间可能未开播，或页面结构已变化)",
+        )
+
+    @staticmethod
+    def _extract_flv_from_html(html: str) -> str:
+        """Extract a playable stream URL from a Douyin room HTML page.
+
+        The room JSON is embedded with escaped quotes (``\\"`` and
+        sometimes ``\\\\"``), so both the key lookup and the URL capture
+        tolerate stray backslashes.  The search is scoped to the text
+        following a ``stream_url`` key to avoid picking up unrelated media
+        URLs elsewhere on the page.  Prefers FLV (same as the API path),
+        falls back to HLS, then to any ``.flv`` URL on the page.
+        """
+        if not html:
+            return ""
+        key_pat = re.compile(r'(?:\\)*"stream_url')
+        url_pat = re.compile(
+            r'(?:\\)*"(flv|hls)(?:\\)*"\s*:(?:\\)*"(https?://[^"\\<>\s]+)'
+        )
+        hls_url = ""
+        for m in key_pat.finditer(html):
+            window = html[m.end(): m.end() + _HTML_STREAM_LOOKAHEAD]
+            for um in url_pat.finditer(window):
+                url = um.group(2)
+                if not url.startswith("http"):
+                    continue
+                if um.group(1) == "flv":
+                    return url
+                if not hls_url:
+                    hls_url = url
+        if hls_url:
+            return hls_url
+        # Last resort: any .flv URL on the page (structure may have changed).
+        loose = re.search(r'https?://[^"\\<>\s]+\.flv[^"\\<>\s]*', html)
+        if loose:
+            logger.warning(
+                "[LiveStream] HTML fallback fell back to loose .flv match"
+            )
+            return loose.group(0)
+        return ""
 
     def _parse_douyin_stream(self, room_data: dict) -> str:
         """Extract FLV URL from Douyin room data.
@@ -455,6 +671,26 @@ class LiveStreamScanner(QThread):
             return ""
 
     # -- Helpers --------------------------------------------------------
+
+    def _diag_response(self, tag: str, response) -> None:
+        """Log HTTP diagnostics for a platform API call.
+
+        Records the status code, body length and a truncated preview of the
+        body – exactly what a user needs to paste when reporting
+        "无法获取直播流地址", so keep it compact.
+        """
+        try:
+            body = response.text or ""
+            preview = body[:_DIAG_PREVIEW_LEN].replace("\n", " ").replace("\r", " ")
+            logger.warning(
+                "[%s] status=%s body_len=%d preview=%r",
+                tag,
+                response.status_code,
+                len(body),
+                preview,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _safe_json(text: str) -> Optional[dict]:
@@ -633,15 +869,15 @@ class LiveStreamScanner(QThread):
         info = self.get_live_stream_info(room_id, self.platform)
 
         if info.status == LiveStreamStatus.Absent:
-            self.error_occurred.emit("房间不存在")
+            self.error_occurred.emit(info.detail or "房间不存在")
             self.is_running = False
             return
         if info.status == LiveStreamStatus.NotLive:
-            self.error_occurred.emit("主播未开播")
+            self.error_occurred.emit(info.detail or "主播未开播")
             self.is_running = False
             return
         if info.status != LiveStreamStatus.Normal or not info.url:
-            self.error_occurred.emit("无法获取直播流地址")
+            self.error_occurred.emit(info.detail or "无法获取直播流地址")
             self.is_running = False
             return
 

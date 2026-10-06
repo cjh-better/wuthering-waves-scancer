@@ -150,6 +150,11 @@ class QRScanner:
             二维码内容，如果没有检测到则返回 None
         """
         try:
+            # 守卫：0 宽高（窗口最小化等）直接跳过，避免把空 bbox 喂给截图/解码
+            if width <= 0 or height <= 0:
+                logger.warning(f"[QR] 非法扫描区域({width}x{height})，跳过")
+                return None
+
             # 考虑屏幕缩放
             x_scaled = int(x * self.scale_factor)
             y_scaled = int(y * self.scale_factor)

@@ -6,6 +6,7 @@ from typing import Optional, List, Tuple
 import ctypes
 import numpy as np
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -81,6 +82,11 @@ class AIQRScanner:
         
         # 🚀 微信QR码识别器（比pyzbar更强大）
         self.wechat_detector = None
+
+        # 原生解码器（WeChatQR / Caffe dnn）不是线程安全的：
+        # try_decode_parallel 会从多个工作线程并发调用 decode，
+        # 必须串行化，否则就是 native segfault（闪退）。这是 #8 的首要嫌疑。
+        self._decode_lock = threading.Lock()
         
         # 🚀 DXGI截图工具（GPU加速，与MHY_Scanner相同，最快）
         self.dxgi_screenshot = None
@@ -294,10 +300,11 @@ class AIQRScanner:
             # 准备输入
             h, w = img.shape[:2]
             blob = cv2.dnn.blobFromImage(img, 1.0, (w, h), (0, 0, 0), swapRB=False, crop=False)
-            
-            # 前向传播
-            self.sr_net.setInput(blob)
-            output = self.sr_net.forward()
+
+            # 前向传播（dnn 非线程安全，与 WeChatQR 共用一把锁串行化）
+            with self._decode_lock:
+                self.sr_net.setInput(blob)
+                output = self.sr_net.forward()
             
             # 处理输出
             output = output[0]
@@ -392,7 +399,13 @@ class AIQRScanner:
                 return None
 
             arr = np.asarray(img_array)
-            if arr.size == 0:
+            # 守卫：空图 / 0 宽高（窗口最小化、截图失败时常见）。
+            # 把这类图像喂给 WeChatQR/dnn 是 native segfault 的高发区，
+            # 必须在这里拦掉，而不是依赖调用方。
+            if arr.size == 0 or 0 in arr.shape:
+                logger.warning(
+                    "[AI] 拒绝解码非法图像(shape=%s)，跳过", getattr(arr, "shape", "?")
+                )
                 return None
 
             img_bgr = arr
@@ -407,7 +420,9 @@ class AIQRScanner:
 
                 if self.wechat_detector is not None:
                     try:
-                        res, points = self.wechat_detector.detectAndDecode(img_bgr)
+                        # WeChatQR 内部有状态，非线程安全：加锁串行化。
+                        with self._decode_lock:
+                            res, points = self.wechat_detector.detectAndDecode(img_bgr)
                         if isinstance(res, str):
                             res = [res]
                         for qr_data in res or []:
@@ -562,6 +577,14 @@ class AIQRScanner:
                 img = ImageGrab.grab(bbox=(x_scaled, y_scaled, x_scaled + width_scaled, y_scaled + height_scaled))
                 screenshot_method = "PIL"
             
+            # 守卫：截图失败/窗口最小化时 img 可能为 None 或 0 尺寸，
+            # 直接喂给后续的 resize/解码是崩溃高发区。
+            if img is None or getattr(img, "width", 0) <= 0 or getattr(img, "height", 0) <= 0:
+                logger.warning(
+                    "[Scan] 截图返回空图像(method=%s)，跳过本次扫描", screenshot_method
+                )
+                return None
+
             # 🚀 性能监控：截图完成
             if PERF_MONITOR_AVAILABLE:
                 perf_monitor.mark_screenshot_done(method=screenshot_method, image_size=(img.width, img.height))
@@ -574,11 +597,14 @@ class AIQRScanner:
             width_ratio = target_width / img.width
             height_ratio = target_height / img.height
             scale_ratio = min(width_ratio, height_ratio)
-            new_width = int(img.width * scale_ratio)
-            new_height = int(img.height * scale_ratio)
+            new_width = max(1, int(img.width * scale_ratio))
+            new_height = max(1, int(img.height * scale_ratio))
             
             img_1280 = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            img_40 = img.resize((int(img.width * 0.4), int(img.height * 0.4)), Image.Resampling.LANCZOS)
+            img_40 = img.resize(
+                (max(1, int(img.width * 0.4)), max(1, int(img.height * 0.4))),
+                Image.Resampling.LANCZOS,
+            )
             
             # 🚀 并行识别多个候选（增加识别率）
             candidates = [
