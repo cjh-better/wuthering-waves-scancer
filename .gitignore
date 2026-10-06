@@ -73,6 +73,7 @@ $RECYCLE.BIN/
 # Screenshots & Test files
 screenshot_*.png
 test_*.py
+!tests/test_*.py
 debug_*.txt
 
 # Compiled files

@@ -600,6 +600,10 @@ class MainWindow(QMainWindow):
                     ai_status.append("QR检测")
                 if ai_status:
                     self.add_log(f"AI模型已加载: {', '.join(ai_status)}")
+            else:
+                # 模型缺失/加载失败：明确告诉用户已降级，避免"闪退/识别差"时无头绪
+                self.add_log("⚠️ AI 模型未加载，已降级为传统识别模式（识别率可能下降）")
+                self.add_log("⚠️ 请确认 ScanModel 目录完整（4 个模型文件都在）")
         except Exception:
             pass
         self.add_log("请先添加账号，选中后点击【开始扫码】")
@@ -871,9 +875,18 @@ class MainWindow(QMainWindow):
         try:
             from utils.live_stream_scanner import get_live_stream_scanner
             self.live_scanner = get_live_stream_scanner()
-            self.live_scanner.qr_detected.connect(self.on_qr_detected)
-            self.live_scanner.status_changed.connect(self.add_log)
-            self.live_scanner.error_occurred.connect(lambda msg: self.add_log(f"❌ {msg}"))
+            self.live_scanner.qr_detected.connect(
+                self.on_qr_detected, Qt.UniqueConnection
+            )
+            self.live_scanner.status_changed.connect(
+                self.add_log, Qt.UniqueConnection
+            )
+            # NOTE: a named slot (not a lambda) is required for
+            # Qt.UniqueConnection to de-duplicate repeated starts, because
+            # the scanner is a process-wide singleton.
+            self.live_scanner.error_occurred.connect(
+                self.on_live_scan_error, Qt.UniqueConnection
+            )
             self.live_scanner.set_stream_url(room_id, platform)
             self.live_scanner.start()
 
@@ -887,6 +900,22 @@ class MainWindow(QMainWindow):
             self.start_live_btn.clicked.connect(self.on_stop_live_scan)
         except Exception as e:
             self.add_log(f"❌ 启动直播流扫描失败: {e}")
+
+    def on_live_scan_error(self, msg: str):
+        """直播流错误：展示细分原因，并把 UI 复位到待机状态。
+
+        之前错误只写日志，按钮还卡在"停止直播扫描"、状态还显示
+        "扫描中"，用户只能重启应用才能重试。
+        """
+        self.add_log(f"❌ {msg}")
+        self.status_label.setText("状态: 待机中")
+        self.start_scan_btn.setEnabled(True)
+        self.start_live_btn.setText("扫描直播")
+        try:
+            self.start_live_btn.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        self.start_live_btn.clicked.connect(self.on_start_live_scan)
 
     def on_stop_live_scan(self):
         """停止直播流扫描"""

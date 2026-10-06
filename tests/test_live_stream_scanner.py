@@ -675,3 +675,155 @@ class TestRunStatusErrors:
 
         _process_events()
         assert any("未开播" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# 11 – Douyin HTML fallback (issues #6 / #7)
+# ---------------------------------------------------------------------------
+
+# Synthetic room HTML: mirrors the real page's escaping style –
+# the room JSON is embedded with \" (and sometimes \\\") sequences.
+_HTML_WITH_FLV = (
+    "<html><head><title>live</title></head><body>"
+    '<script>window.DATA="'
+    '{\\"stream_url\\":{\\"live_core_sdk_data\\":{\\"pull_data\\":'
+    '{\\"stream_data\\":\\"{\\\\\\"data\\\\\\":{\\\\\\"origin\\\\\\":'
+    '{\\\\\\"main\\\\\\":{\\\\\\"flv\\\\\\":\\\\\\"'
+    "https://pull-hs-f123.douyincdn.com/third/stream.flv?sign=abc123"
+    '\\"}}}}}\\/"}}}"'
+    "</script></body></html>"
+)
+_EXPECTED_FLV = "https://pull-hs-f123.douyincdn.com/third/stream.flv?sign=abc123"
+
+_HTML_WITHOUT_STREAM = (
+    "<html><head></head><body>"
+    '<script>window.DATA="{\\"room_id\\":\\"123456\\"}";</script>'
+    "</body></html>"
+)
+
+
+def _http_resp(status_code: int, text: str):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text
+    return resp
+
+
+class TestDouyinHtmlFallback:
+    """Issues #6/#7: web/enter returns HTTP 200 with an empty body."""
+
+    def test_extract_flv_from_escaped_html(self):
+        url = LiveStreamScanner._extract_flv_from_html(_HTML_WITH_FLV)
+        assert url == _EXPECTED_FLV
+
+    def test_extract_flv_prefers_scoped_match(self):
+        # An unrelated flv URL elsewhere on the page must not win over the
+        # stream_url-scoped one.
+        html = (
+            '<script>var ad="https://cdn.test/ad.flv";</script>'
+            + _HTML_WITH_FLV
+        )
+        url = LiveStreamScanner._extract_flv_from_html(html)
+        assert url == _EXPECTED_FLV
+
+    def test_extract_flv_empty_html(self):
+        assert LiveStreamScanner._extract_flv_from_html("") == ""
+        assert LiveStreamScanner._extract_flv_from_html("<html></html>") == ""
+
+    def test_empty_api_body_falls_back_to_html(self):
+        scanner = LiveStreamScanner()
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.side_effect = [
+                _http_resp(200, ""),  # web/enter API: empty body (wind-control)
+                _http_resp(200, _HTML_WITH_FLV),  # room HTML page
+            ]
+            info = scanner._get_douyin_stream_info("123456")
+
+        assert info.status == LiveStreamStatus.Normal
+        assert info.url == _EXPECTED_FLV
+        assert mock_session.get.call_count == 2
+
+    def test_html_without_stream_data_reports_clear_detail(self):
+        scanner = LiveStreamScanner()
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.side_effect = [
+                _http_resp(200, ""),
+                _http_resp(200, _HTML_WITHOUT_STREAM),
+            ]
+            info = scanner._get_douyin_stream_info("123456")
+
+        assert info.status == LiveStreamStatus.Error
+        assert "HTML备用通道" in info.detail
+        assert "疑似被风控" in info.detail  # API-side reason is preserved
+
+    def test_api_http_error_carries_status_in_detail(self):
+        scanner = LiveStreamScanner()
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.side_effect = [
+                _http_resp(403, ""),
+                _http_resp(403, ""),
+            ]
+            info = scanner._get_douyin_stream_info("123456")
+
+        assert info.status == LiveStreamStatus.Error
+        assert "HTTP 403" in info.detail
+
+    def test_api_absent_is_authoritative_no_html_fetch(self):
+        scanner = LiveStreamScanner()
+        api = _http_resp(200, json.dumps({"status_code": 40001, "data": {}}))
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.return_value = api
+            info = scanner._get_douyin_stream_info("123456")
+
+        assert info.status == LiveStreamStatus.Absent
+        assert "房间不存在" in info.detail
+        assert mock_session.get.call_count == 1  # no HTML fallback attempted
+
+    def test_api_not_live_is_authoritative(self):
+        scanner = LiveStreamScanner()
+        api = _http_resp(
+            200,
+            json.dumps(
+                {
+                    "status_code": 0,
+                    "data": {"data": [{"status": 4, "stream_url": {}}]},
+                }
+            ),
+        )
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.return_value = api
+            info = scanner._get_douyin_stream_info("123456")
+
+        assert info.status == LiveStreamStatus.NotLive
+        assert mock_session.get.call_count == 1
+
+    def test_bilibili_http_error_carries_detail(self):
+        scanner = LiveStreamScanner()
+        with patch.object(scanner, "_session") as mock_session:
+            mock_session.get.return_value = _http_resp(500, "error")
+            info = scanner._get_bilibili_stream_info("12345")
+
+        assert info.status == LiveStreamStatus.Error
+        assert "HTTP 500" in info.detail
+
+    def test_run_emits_detailed_reason(self):
+        """run() must surface info.detail instead of the generic message."""
+        scanner = LiveStreamScanner()
+        scanner.set_stream_url("123", "douyin")
+        errors: list[str] = []
+        scanner.error_occurred.connect(
+            errors.append, Qt.ConnectionType.DirectConnection
+        )
+
+        detailed = LiveStreamInfo(
+            status=LiveStreamStatus.Error,
+            detail="接口返回空响应(疑似被风控)；HTML备用通道：页面未包含直播流地址",
+        )
+        with patch.object(
+            scanner, "get_live_stream_info", return_value=detailed
+        ):
+            scanner.start()
+            scanner.wait(3000)
+
+        _process_events()
+        assert any("疑似被风控" in e for e in errors)
